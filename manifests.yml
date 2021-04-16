@@ -1,0 +1,63 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: console-proxy
+  labels:
+    app: console
+    tier: proxy
+spec:
+  sessionAffinity: ClientIP
+  ports:
+    - port: 30002
+      targetPort: 30002
+  selector:
+    app: console
+    tier: proxy
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: console-proxy
+  labels:
+    app: console
+    tier: proxy
+spec:
+  selector:
+    matchLabels:
+      app: console
+      tier: proxy
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+  template:
+    metadata:
+      labels:
+        app: console
+        tier: proxy
+    spec:
+      containers:
+        - image: ${IMAGE}
+          name: console-proxy
+          resources:
+            limits:
+              cpu: 500m
+              memory: 500Mi
+            requests:
+              cpu: 100m
+              memory: 100Mi
+          env:
+            - name: NODE_ENV
+              value: 'production'
+            - name: PORT
+              value: '30002'
+            - name: TMP_SERVER
+              valueFrom:
+                configMapKeyRef:
+                  name: console-proxy
+                  key: tmp-server
+          ports:
+            - containerPort: 30002
+              name: console-proxy
