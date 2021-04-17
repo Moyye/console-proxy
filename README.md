@@ -72,8 +72,6 @@ $ docker pull selypan/console-proxy:latest
 $ docker run -d -p 3000:3000 selypan/console-proxy:latest
 ```
 
-## License
-
 ### 配置地址
 - 格式为 http://IP:PORT
 - 例如部署在本地的就是 http://127.0.0.1:3000
@@ -81,4 +79,4 @@ $ docker run -d -p 3000:3000 selypan/console-proxy:latest
 
 ## License
 
-Nest is [MIT licensed](LICENSE).
+[MIT licensed](LICENSE).
