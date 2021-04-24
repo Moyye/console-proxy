@@ -15,7 +15,7 @@ import { ClientChannel } from 'ssh2';
 import { ConsoleSocket, SFTP } from './interface';
 import { decrypt, md5, sleep, WsErrorCatch } from './utils/kit';
 import * as _ from 'lodash';
-import moment from 'moment';
+import * as moment from 'moment';
 import { Undefinable } from 'tsdef';
 
 enum KEYS {
