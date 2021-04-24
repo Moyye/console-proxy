@@ -130,21 +130,29 @@ export class AppService
   @WsErrorCatch()
   async newTerminal(
     socket: ConsoleSocket,
-    { id, host, username, password, port = 22 },
+    { id, host, username, password = '', privateKey = '', port = 22 },
   ) {
     try {
       const secretKey = md5(`${host}${username}${port}`).toString();
-      password = decrypt(password, secretKey);
+
+      if (password) {
+        password = decrypt(password, secretKey);
+      }
+      if (privateKey) {
+        privateKey = decrypt(privateKey, secretKey);
+      }
 
       const connectionId = md5(
-        `${host}${username}${port}${password}`,
+        `${host}${username}${port}${password}${privateKey}`,
       ).toString();
+
       const connection = (await this.getConnection(connectionId, {
         host: host === 'linuxServer' ? process.env.TMP_SERVER : host,
         username,
-        password,
         port,
         tryKeyboard: true,
+        ...(password && { password }),
+        ...(privateKey && { privateKey }),
       }))!;
 
       // 初始化 sftp
