@@ -23,6 +23,7 @@
     "@nestjs/platform-socket.io": "^7.6.15",
     "@nestjs/websockets": "^7.6.15",
     "crypto-js": "^4.0.0",
+    "is-valid-domain": "^0.0.19",
     "lodash": "^4.17.21",
     "moment": "^2.29.1",
     "node-ssh": "^11.1.1",

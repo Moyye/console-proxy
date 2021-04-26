@@ -11,12 +11,15 @@ import { promisify } from 'util';
 import * as Path from 'path';
 import { Config as ConnectionConfig, NodeSSH } from 'node-ssh';
 import { ClientChannel } from 'ssh2';
-
-import { ConsoleSocket, SFTP } from './interface';
-import { decrypt, md5, sleep, WsErrorCatch } from './utils/kit';
 import * as _ from 'lodash';
 import * as moment from 'moment';
 import { Undefinable } from 'tsdef';
+import * as isValidDomain from 'is-valid-domain';
+import * as dns from 'dns';
+const lookup = promisify(dns.lookup);
+
+import { ConsoleSocket, SFTP } from './interface';
+import { decrypt, md5, sleep, WsErrorCatch } from './utils/kit';
 
 enum KEYS {
   connectionId = '__id',
@@ -468,6 +471,14 @@ export class AppService
     }
 
     if (config) {
+      if (isValidDomain(config.host, { allowUnicode: true })) {
+        try {
+          const { address } = await lookup(config.host);
+          config.host = address;
+        } catch (e) {
+          // nothing
+        }
+      }
       const connection = await new NodeSSH().connect(config);
       connection.connection?.on('error', (error) => {
         this.logger.error('connection server error', error.stack);
