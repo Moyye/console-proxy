@@ -1,4 +1,18 @@
-### 需要预先安装 node14+ 环境
+
+
+### 配置地址
+- 格式为 http://IP:PORT
+- 例如部署在本地的就是 http://127.0.0.1:3000 （http协议，不是https协议哦）
+
+### 方法一：Docker 运行
+```
+# 建议每次执行 docker pull 每次获取最新的镜像
+$ docker pull selypan/console-proxy:latest
+$ docker run -d -p 3000:3000 selypan/console-proxy:latest
+```
+
+
+### 方法二：需要预先安装 node14+ 环境
 #### windows 和 mac 推荐下载安装包直接安装 [中文官网地址](http://nodejs.cn/download/)
 
 #### mac 和 linux 推荐使用进行安装nvm进行安装 [github首页](https://github.com/nvm-sh/nvm)
@@ -64,18 +78,6 @@ $ pm2 startup
 # 停止 pm2 (不建议,pm2 后台运行几乎没有消耗)
 $ pm2 kill
 ```
-
-### Docker 运行
-```
-# 建议每次执行 docker pull 每次获取最新的镜像
-$ docker pull selypan/console-proxy:latest
-$ docker run -d -p 3000:3000 selypan/console-proxy:latest
-```
-
-### 配置地址
-- 格式为 http://IP:PORT
-- 例如部署在本地的就是 http://127.0.0.1:3000
-
 
 ## License
 
