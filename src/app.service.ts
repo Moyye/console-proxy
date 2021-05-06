@@ -16,6 +16,7 @@ import * as moment from 'moment';
 import { Undefinable } from 'tsdef';
 import * as isValidDomain from 'is-valid-domain';
 import * as dns from 'dns';
+
 const lookup = promisify(dns.lookup);
 
 import { ConsoleSocket, SFTP } from './interface';
@@ -446,6 +447,21 @@ export class AppService
     };
   }
 
+  @SubscribeMessage('file:mkdir')
+  @WsErrorCatch()
+  async mkdir(@MessageBody() { id, data: { remotePath } }) {
+    const sftp = await this.getSftp(id);
+    if (!sftp) {
+      return { errorMessage: '无法连接' };
+    }
+
+    await sftp.mkdir(remotePath, {});
+
+    return {
+      data: true,
+    };
+  }
+
   private async getConnection(
     connectId: string,
     config?: ConnectionConfig,
@@ -491,21 +507,6 @@ export class AppService
     }
 
     return undefined;
-  }
-
-  @SubscribeMessage('file:mkdir')
-  @WsErrorCatch()
-  async mkdir(@MessageBody() { id, data: { remotePath } }) {
-    const sftp = await this.getSftp(id);
-    if (!sftp) {
-      return { errorMessage: '无法连接' };
-    }
-
-    await sftp.mkdir(remotePath, {});
-
-    return {
-      data: true,
-    };
   }
 
   private clearConnection(connection: NodeSSH, force = false) {
