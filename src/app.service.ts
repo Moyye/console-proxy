@@ -36,7 +36,8 @@ enum KEYS {
 @Injectable()
 @WebSocketGateway()
 export class AppService
-  implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect {
+  implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect
+{
   private logger: Logger = new Logger('WebsocketGateway');
 
   private connectionMap: Map<string, NodeSSH> = new Map();
@@ -44,10 +45,6 @@ export class AppService
   private shellMap: Map<string, ClientChannel> = new Map();
 
   private ftpMap: Map<string, SFTP> = new Map();
-
-  ping(): string {
-    return 'pong';
-  }
 
   static sftpPromisify(sftpClient) {
     ['readdir', 'readFile', 'writeFile', 'rename', 'unlink', 'rmdir'].forEach(
@@ -57,6 +54,24 @@ export class AppService
     );
 
     return sftpClient;
+  }
+
+  private static execs(connection: NodeSSH, command: string) {
+    return connection.execCommand(command, {
+      execOptions: { env: { HISTIGNORE: '*' } },
+    });
+  }
+
+  private static exec(
+    connection: NodeSSH,
+    command: string,
+    parameters: string[],
+  ) {
+    return connection.exec(command, parameters);
+  }
+
+  ping(): string {
+    return 'pong';
   }
 
   async getSftp(
@@ -201,7 +216,7 @@ export class AppService
     const shell = await this.getShell(id);
     if (shell) {
       const connection: NodeSSH = _.get(shell, KEYS.connection);
-      const socket: ConsoleSocket = _.get(connection, KEYS.socket);
+      // const socket: ConsoleSocket = _.get(connection, KEYS.socket);
       const sshMap: Record<string, NodeSSH> = _.get(connection, KEYS.shellMap);
 
       shell.close();
@@ -223,7 +238,7 @@ export class AppService
       if (!connection) {
         return { errorMessage: '无法连接' };
       }
-      const { stdout } = await this.execs(connection, 'pwd');
+      const { stdout } = await AppService.execs(connection, 'pwd');
       targetPath = stdout;
     }
 
@@ -245,7 +260,7 @@ export class AppService
           isDir: file.attrs.isDirectory(),
           filename: file.filename,
           size: file.attrs.size || 0,
-          id: Path.join(targetPath, file.filename),
+          id: targetPath + '/' + file.filename,
         };
       })
       .filter((file) => file.isDir || file.isFile);
@@ -268,11 +283,11 @@ export class AppService
     }
 
     if (!path) {
-      const { stdout } = await this.execs(connection, 'pwd');
+      const { stdout } = await AppService.execs(connection, 'pwd');
       targetPath = stdout;
     }
 
-    const { stdout } = await this.execs(
+    const { stdout } = await AppService.execs(
       connection,
       `find ${targetPath} -type f -name "*${search}*" | head -20`,
     );
@@ -303,7 +318,7 @@ export class AppService
       return { errorMessage: '无法连接' };
     }
 
-    await this.execs(connection, `touch ${remotePath}`);
+    await AppService.execs(connection, `touch ${remotePath}`);
 
     return {
       data: true,
@@ -318,7 +333,7 @@ export class AppService
       return { errorMessage: '无法连接' };
     }
 
-    const { stdout: statusStr = '' } = await this.execs(
+    const { stdout: statusStr = '' } = await AppService.execs(
       connection,
       'cat .terminal.icu/agent/status.txt',
     );
@@ -378,7 +393,7 @@ export class AppService
       tarFileStringArr.push(item.path);
       tarFileStringArr.push(item.filename);
     });
-    await this.exec(connection, 'tar', tarFileStringArr);
+    await AppService.exec(connection, 'tar', tarFileStringArr);
     const buffer = await sftp.readFile(tarFilename, {});
     sftp.unlink(tarFilename).then();
 
@@ -440,7 +455,7 @@ export class AppService
       return { errorMessage: '无法连接' };
     }
 
-    await this.execs(connection, `rm -rf ${remotePath}`);
+    await AppService.execs(connection, `rm -rf ${remotePath}`);
 
     return {
       data: true,
@@ -559,13 +574,13 @@ export class AppService
       _.set(connection, '_initAgentLock', true);
 
       // 初始化 node
-      const checkNodeResult = await this.execs(
+      const checkNodeResult = await AppService.execs(
         connection,
         '.terminal.icu/node/bin/node -v',
       );
       if (!checkNodeResult.stdout) {
         let arch = 'x64';
-        const { stdout } = await this.execs(connection, 'uname -m');
+        const { stdout } = await AppService.execs(connection, 'uname -m');
         if (stdout.includes('x86') || stdout.includes('x64')) {
           arch = 'x64';
         } else if (stdout.includes('amd64') || stdout.includes('arm64')) {
@@ -574,7 +589,7 @@ export class AppService
           arch = 'armv7l';
         }
 
-        const data = await this.execs(
+        const data = await AppService.execs(
           connection,
           'mkdir -p .terminal.icu' +
             '&& cd .terminal.icu' +
@@ -591,7 +606,7 @@ export class AppService
       }
 
       // 初始化脚本
-      await this.execs(connection, 'mkdir -p .terminal.icu/agent');
+      await AppService.execs(connection, 'mkdir -p .terminal.icu/agent');
       await connection.putFiles(
         [
           {
@@ -611,7 +626,7 @@ export class AppService
       if (checkNodeResult.stdout) {
         nodeExists = true;
       } else {
-        const checkNodeResult2 = await this.execs(
+        const checkNodeResult2 = await AppService.execs(
           connection,
           '.terminal.icu/node/bin/node -v',
         );
@@ -630,15 +645,5 @@ export class AppService
     } catch (error) {
       this.logger.error('[initAgent] error', error.stack);
     }
-  }
-
-  private execs(connection: NodeSSH, command: string) {
-    return connection.execCommand(command, {
-      execOptions: { env: { HISTIGNORE: '*' } },
-    });
-  }
-
-  private exec(connection: NodeSSH, command: string, parameters: string[]) {
-    return connection.exec(command, parameters);
   }
 }
