@@ -13,7 +13,7 @@
     "start:dev": "nest start --watch",
     "start:debug": "nest start --debug --watch",
     "start:prod": "node dist/main",
-    "build:electron": "nest build --webpack",
+    "build:electron": "yarn && nest build --webpack && yarn install --production",
     "lint": "eslint \"{src,apps,libs,test}/**/*.ts\" --fix"
   },
   "dependencies": {
@@ -29,11 +29,10 @@
     "moment": "^2.29.1",
     "node-ssh": "^11.1.1",
     "reflect-metadata": "^0.1.13",
-    "rimraf": "^3.0.2",
-    "rxjs": "^6.6.6",
-    "tsdef": "0.0.14"
+    "rxjs": "^6.6.6"
   },
   "devDependencies": {
+    "rimraf": "^3.0.2",
     "@nestjs/cli": "^7.6.0",
     "@nestjs/schematics": "^7.3.0",
     "@nestjs/testing": "^7.6.15",
@@ -54,6 +53,7 @@
     "ts-loader": "^8.0.18",
     "ts-node": "^9.1.1",
     "tsconfig-paths": "^3.9.0",
-    "typescript": "^4.2.3"
+    "typescript": "^4.2.3",
+    "tsdef": "0.0.14"
   }
 }
