@@ -195,7 +195,13 @@ export class AppService
         socket.emit('terminal:data', { data: data.toString(), id });
       });
       shell.on('close', () => {
-        socket.emit('terminal:data', { data: '连接意外退出,请重新连接', id });
+        socket.emit('terminal:data', {
+          data: '连接意外退出,重新连接中\r\n',
+          id,
+        });
+        setTimeout(() => {
+          socket.emit('terminal:reconnect', { id });
+        }, 2 * 1000);
       });
       shell.on('error', (error) => {
         this.logger.error(`[shell]: ${host}${username} error`, error.stack());
@@ -221,6 +227,7 @@ export class AppService
 
       shell.close();
       delete sshMap[id];
+      this.shellMap.delete(id);
       this.logger.log(`[closeTerminal] socketId: ${id}`);
 
       if (_.isEmpty(sshMap)) {
@@ -331,6 +338,9 @@ export class AppService
     const connection = await this.getConnection(id, undefined, 1000);
     if (!connection) {
       return { errorMessage: '无法连接' };
+    }
+    if (!connection.isConnected()) {
+      this.clearConnection(connection);
     }
 
     const { stdout: statusStr = '' } = await AppService.execs(
@@ -511,8 +521,13 @@ export class AppService
         }
       }
       const connection = await new NodeSSH().connect(config);
+
       connection.connection?.on('error', (error) => {
         this.logger.error('connection server error', error.stack);
+        this.clearConnection(connection, true);
+      });
+      connection.connection?.on('close', () => {
+        this.logger.warn('connection server close');
         this.clearConnection(connection, true);
       });
       this.connectionMap.set(connectId, connection);
@@ -529,37 +544,41 @@ export class AppService
       connection,
       KEYS.shellMap,
     );
-    if (shellMap && !force) {
+    if (shellMap) {
       _.set(connection, KEYS.shellMap, undefined);
-      for (const shell of Object.values(shellMap)) {
+      for (const [id, shell] of Object.entries(shellMap)) {
+        this.shellMap.delete(id);
         shell.close();
       }
     }
 
-    const clearConnectionTimeoutHolder = setTimeout(() => {
-      const connectionId = _.get(connection, KEYS.connectionId);
-      const socket: ConsoleSocket = _.get(connection, KEYS.socket);
+    const clearConnectionTimeoutHolder = setTimeout(
+      () => {
+        const connectionId = _.get(connection, KEYS.connectionId);
+        const socket: ConsoleSocket = _.get(connection, KEYS.socket);
 
-      // 清除刷新状态的的 shell
-      const statusShell: ClientChannel = _.get(connection, KEYS.statusShell);
-      if (statusShell) {
-        statusShell.close();
-      }
+        // 清除刷新状态的的 shell
+        const statusShell: ClientChannel = _.get(connection, KEYS.statusShell);
+        if (statusShell) {
+          statusShell.close();
+        }
 
-      // 清除 sftp
-      this.ftpMap.delete(connectionId);
-      const sftp: SFTP = _.get(connection, KEYS.sftp);
-      if (sftp) {
-        _.set(connection, KEYS.sftp, undefined);
-        sftp.end();
-      }
+        // 清除 sftp
+        this.ftpMap.delete(connectionId);
+        const sftp: SFTP = _.get(connection, KEYS.sftp);
+        if (sftp) {
+          _.set(connection, KEYS.sftp, undefined);
+          sftp.end();
+        }
 
-      delete socket[connectionId];
-      this.connectionMap.delete(connectionId);
-      connection.dispose();
+        delete socket[connectionId];
+        this.connectionMap.delete(connectionId);
+        connection.dispose();
 
-      this.logger.log(`[clearConnection] connectionId: ${connectionId}`);
-    }, 10 * 1000);
+        this.logger.log(`[clearConnection] connectionId: ${connectionId}`);
+      },
+      force ? 0 : 10 * 1000,
+    );
 
     _.set(
       connection,
