@@ -36,8 +36,7 @@ enum KEYS {
 @Injectable()
 @WebSocketGateway()
 export class AppService
-  implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect
-{
+  implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect {
   private logger: Logger = new Logger('WebsocketGateway');
 
   private connectionMap: Map<string, NodeSSH> = new Map();
@@ -195,6 +194,9 @@ export class AppService
         socket.emit('terminal:data', { data: data.toString(), id });
       });
       shell.on('close', () => {
+        if (connection.isConnected()) {
+          this.closeTerminal({ id });
+        }
         socket.emit('terminal:data', {
           data: '连接意外退出,重新连接中\r\n',
           id,
