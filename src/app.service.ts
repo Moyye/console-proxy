@@ -248,7 +248,7 @@ export class AppService
         return { errorMessage: '无法连接' };
       }
       const { stdout } = await AppService.execs(connection, 'pwd');
-      targetPath = stdout;
+      targetPath = stdout || '/';
     }
 
     const sftp = await this.getSftp(id, undefined, 1000);
@@ -269,7 +269,7 @@ export class AppService
           isDir: file.attrs.isDirectory(),
           filename: file.filename,
           size: file.attrs.size || 0,
-          id: targetPath + '/' + file.filename,
+          id: (targetPath + '/' + file.filename).replace('//', '/'),
         };
       })
       .filter((file) => file.isDir || file.isFile);
@@ -322,12 +322,11 @@ export class AppService
   @SubscribeMessage('file:touch')
   @WsErrorCatch()
   async touch(@MessageBody() { id, data: { remotePath } }) {
-    const connection = await this.getConnection(id);
-    if (!connection) {
+    const sftp = await this.getSftp(id);
+    if (!sftp) {
       return { errorMessage: '无法连接' };
     }
-
-    await AppService.execs(connection, `touch ${remotePath}`);
+    await sftp.writeFile(remotePath, '');
 
     return {
       data: true,
@@ -345,17 +344,17 @@ export class AppService
       this.clearConnection(connection);
     }
 
-    const { stdout: statusStr = '' } = await AppService.execs(
-      connection,
-      'cat .terminal.icu/agent/status.txt',
-    );
-    if (!statusStr) {
-      return { errorMessage: 'agent 初始化失败' };
-    }
+    try {
+      const sftp = await this.getSftp(id);
+      if (!sftp) {
+        return { errorMessage: '无法连接' };
+      }
+      const file = await sftp.readFile('.terminal.icu/agent/status.txt', {});
 
-    return {
-      data: JSON.parse(statusStr),
-    };
+      return { data: JSON.parse(file.toString()) };
+    } catch (e) {
+      return { data: {} };
+    }
   }
 
   @SubscribeMessage('file:writeFile')
@@ -467,7 +466,14 @@ export class AppService
       return { errorMessage: '无法连接' };
     }
 
-    await AppService.execs(connection, `rm -rf ${remotePath}`);
+    const { stderr } = await AppService.execs(
+      connection,
+      `rm -rf ${remotePath}`,
+    );
+    if (stderr) {
+      const sftp = await this.getSftp(id);
+      await sftp.rmdir(remotePath);
+    }
 
     return {
       data: true,
@@ -594,40 +600,96 @@ export class AppService
       if (_.get(connection, '_initAgentLock')) return;
       _.set(connection, '_initAgentLock', true);
 
-      // 初始化 node
-      const checkNodeResult = await AppService.execs(
-        connection,
-        '.terminal.icu/node/bin/node -v',
-      );
-      if (!checkNodeResult.stdout) {
-        let arch = 'x64';
-        const { stdout } = await AppService.execs(connection, 'uname -m');
-        if (stdout.includes('x86') || stdout.includes('x64')) {
-          arch = 'x64';
-        } else if (stdout.includes('amd64') || stdout.includes('arm64')) {
-          arch = 'arm64';
-        } else if (stdout.includes('armv7l') || stdout.includes('arm32')) {
-          arch = 'armv7l';
+      let nodePath = '';
+      // 检查node是否已经安装
+      const nativeNode = await AppService.execs(connection, 'node -v');
+
+      if (
+        nativeNode.stdout &&
+        Number.parseInt(nativeNode.stdout.replace('v', '').split('.')[0], 10) >=
+          8
+      ) {
+        nodePath = 'node';
+      }
+
+      if (!nodePath) {
+        // 初始化 node
+        const checkIsInitNode = await AppService.execs(
+          connection,
+          '.terminal.icu/node/bin/node -v',
+        );
+        if (checkIsInitNode.stdout) {
+          nodePath = '.terminal.icu/node/bin/node';
         }
 
-        const data = await AppService.execs(
-          connection,
-          'mkdir -p .terminal.icu' +
-            '&& cd .terminal.icu' +
-            `&& wget http://npm.taobao.org/mirrors/node/v14.16.0/node-v14.16.0-linux-${arch}.tar.xz -q` +
-            `&& tar -xvf node-v14.16.0-linux-${arch}.tar.xz` +
-            `&& rm node-v14.16.0-linux-${arch}.tar.xz` +
-            `&& mv node-v14.16.0-linux-${arch} node`,
-        );
-        if (data.stderr) {
-          await connection.execCommand(
-            `echo ${data.stderr} > .terminal.icu/error.txt`,
+        if (!checkIsInitNode.stdout) {
+          await AppService.execs(connection, 'mkdir -p .terminal.icu/agent');
+
+          this.logger.log('[initAgent] install node start');
+          // 传送检查脚本
+          await connection.putFile(
+            Path.join(__dirname, 'detector/detect-node.sh'),
+            '.terminal.icu/agent/detect-node.sh',
+          );
+
+          const { stdout: nodeRelease, stderr } = await AppService.execs(
+            connection,
+            'bash .terminal.icu/agent/detect-node.sh',
+          );
+
+          if (stderr) {
+            throw new Error(`[initAgent] bash not support ${stderr}`);
+          }
+
+          const nodeVersion = nodeRelease.split('-')[1];
+          this.logger.log(`[initAgent] install node version ${nodeRelease}`);
+
+          // 尝试外网安装，速度快，不限速
+          this.logger.log(`[initAgent] install node use wget`);
+          const data = await AppService.execs(
+            connection,
+            'cd .terminal.icu' +
+              `&& wget http://npm.taobao.org/mirrors/node/${nodeVersion}/${nodeRelease} -q`,
+          );
+          if (data.stderr) {
+            this.logger.log(`[initAgent] install node use sftp`);
+
+            // 外网不行则直接发送
+            try {
+              await connection.putFile(
+                Path.join(__dirname, `detector/node/${nodeRelease}`),
+                `.terminal.icu/${nodeRelease}`,
+              );
+            } catch (error) {
+              this.logger.error('[init agent] error', error);
+              throw error;
+            }
+          }
+
+          // 解压缩
+          const compressResult = await AppService.execs(
+            connection,
+            'cd .terminal.icu' +
+              `&& tar -xzf ${nodeRelease}` +
+              `&& rm ${nodeRelease}` +
+              `&& mv ${nodeRelease.replace('.tar.gz', '')} node`,
+          );
+
+          if (!compressResult.stderr) {
+            nodePath = '.terminal.icu/node/bin/node';
+          }
+          this.logger.log(
+            '[init agent] compressResult',
+            JSON.stringify(compressResult),
           );
         }
       }
 
       // 初始化脚本
-      await AppService.execs(connection, 'mkdir -p .terminal.icu/agent');
+      try {
+        await AppService.execs(connection, 'mkdir -p .terminal.icu/agent');
+      } catch (e) {}
+
       await connection.putFiles(
         [
           {
@@ -643,25 +705,15 @@ export class AppService
       );
 
       // 初始化监控
-      let nodeExists = false;
-      if (checkNodeResult.stdout) {
-        nodeExists = true;
-      } else {
-        const checkNodeResult2 = await AppService.execs(
-          connection,
-          '.terminal.icu/node/bin/node -v',
-        );
-        if (checkNodeResult2.stdout) {
-          nodeExists = true;
-        }
-      }
-
-      if (nodeExists) {
-        const statusShell = await connection.requestShell();
-        statusShell.write(
-          '.terminal.icu/node/bin/node .terminal.icu/agent/linuxInfo.js\r\n',
-        );
+      if (nodePath) {
+        const statusShell = await connection.requestShell({
+          env: { HISTIGNORE: '*' },
+        });
+        statusShell.write(`${nodePath} .terminal.icu/agent/linuxInfo.js\r\n`);
         _.set(connection, KEYS.statusShell, statusShell);
+        // statusShell.on('data', (data) => {
+        //   console.log(data.toString());
+        // });
       }
     } catch (error) {
       this.logger.error('[initAgent] error', error.stack);

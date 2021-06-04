@@ -1,6 +1,10 @@
-const { writeFile, stat } = require('fs/promises');
+const fs = require('fs');
+const util = require('util');
 const path = require('path');
 const agent = require('./base');
+
+const writeFile = util.promisify(fs.writeFile);
+const stat = util.promisify(fs.stat);
 
 function round(number, precision = 2) {
   if (typeof number === 'number') {
@@ -54,13 +58,14 @@ async function getFsSize(result) {
   }));
 
   result.fsStats = {
-    rxSec: round(fsStats.rx_sec),
-    wxSec: round(fsStats.wx_sec),
+    rxSec: round((fsStats && fsStats.rx_sec) || 0),
+    wxSec: round((fsStats && fsStats.wx_sec) || 0),
   };
 }
 
 let rxInit = 0;
 let txInit = 0;
+
 async function getNetworkStats(result) {
   const networkStats = await agent.networkStats();
   if (!rxInit) {
@@ -131,6 +136,7 @@ async function getOs(result) {
 }
 
 let counter = 0;
+
 async function refresh() {
   const refreshTimeInterval = 4000;
   const statusFilePath = path.join(__dirname, 'status.txt');
@@ -164,9 +170,7 @@ async function refresh() {
   ]);
 
   await writeFile(statusFilePath, JSON.stringify(result));
-  counter += 1;
-
-  console.timeEnd(`refresh ${counter}`);
+  console.timeEnd(`refresh`);
   setTimeout(refresh, refreshTimeInterval);
 }
 
