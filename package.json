@@ -12,7 +12,7 @@
     "start:dev": "nest start --watch",
     "start:debug": "nest start --debug --watch",
     "start:prod": "node dist/main",
-    "build:electron": "npm insatll && nest build --webpack && yarn install --production=true ",
+    "build:electron": "npm install && nest build --webpack && yarn install --production=true ",
     "lint": "eslint \"{src,apps,libs,test}/**/*.ts\" --fix"
   },
   "dependencies": {
