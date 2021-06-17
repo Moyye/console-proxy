@@ -1,14 +1,7 @@
 import { Module } from '@nestjs/common';
-import { TerminalController } from './terminal.controller';
-import { ForwardController } from './forward.controller';
-import { TerminalService } from './terminal.service';
+import { AppService } from './app.service';
 import { ConfigModule } from '@nestjs/config';
-import { ForwardService } from './forward.service';
-
-const controllers: any = [TerminalController];
-if (process.env.RUNTIME_ENV !== 'OFFICE') {
-  controllers.push(ForwardController);
-}
+import { AppController } from './app.controller';
 
 @Module({
   imports: [
@@ -16,7 +9,7 @@ if (process.env.RUNTIME_ENV !== 'OFFICE') {
       envFilePath: ['.prod.env', '.default.env'],
     }),
   ],
-  controllers: controllers,
-  providers: [TerminalService, ForwardService],
+  controllers: [AppController],
+  providers: [AppService],
 })
 export class AppModule {}
