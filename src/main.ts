@@ -11,6 +11,11 @@ async function bootstrap() {
     credentials: true,
   });
 
+  console.log('listen PORT', process.env.PORT);
   await app.listen(process.env.PORT);
 }
 bootstrap().then();
+
+process.setUncaughtExceptionCaptureCallback((error) => {
+  console.log(error);
+});

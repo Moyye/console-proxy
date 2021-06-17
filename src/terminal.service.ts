@@ -167,6 +167,7 @@ export class TerminalService
         username,
         port,
         tryKeyboard: true,
+        keepaliveInterval: 10000,
         ...(password && { password }),
         ...(privateKey && { privateKey }),
       }))!;
@@ -209,7 +210,7 @@ export class TerminalService
 
       this.logger.log(`[newTerminal] connected, server: ${username}@${host}`);
     } catch (error) {
-      this.logger.error('[newTerminal ] error', error.stack);
+      this.logger.error('[newTerminal] error', error.stack);
       return {
         success: false,
         errorMessage: error.message,

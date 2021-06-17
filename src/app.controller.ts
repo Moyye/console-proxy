@@ -1,4 +1,4 @@
-import { Body, Controller, Delete, Get, Post, Query } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Post } from '@nestjs/common';
 import { TerminalService } from './terminal.service';
 import { ForwardService } from './forward.service';
 import { ForwardInRequestDto, ForwardInResponseDto } from './dto';
@@ -22,8 +22,8 @@ export class AppController {
     return this.forwardService.newForwardIn(body);
   }
 
-  @Delete('/forward')
-  async unForward(@Query('id') id: string) {
+  @Delete('/forward/:id')
+  async unForward(@Param('id') id: string) {
     await this.forwardService.unForward(id);
   }
 

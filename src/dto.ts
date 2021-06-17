@@ -1,7 +1,7 @@
 import { Config as ConnectionConfig } from 'node-ssh';
 
 export interface ForwardInParams {
-  id: string,
+  id: string;
   config: ConnectionConfig;
   remoteAddr: string;
   remotePort: number;
