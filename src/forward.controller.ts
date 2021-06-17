@@ -1,19 +1,10 @@
 import { Body, Controller, Delete, Get, Param, Post } from '@nestjs/common';
-import { TerminalService } from './terminal.service';
 import { ForwardService } from './forward.service';
 import { ForwardInRequestDto, ForwardInResponseDto } from './dto';
 
 @Controller()
-export class AppController {
-  constructor(
-    private readonly terminalService: TerminalService,
-    private readonly forwardService: ForwardService,
-  ) {}
-
-  @Get()
-  ping(): string {
-    return this.forwardService.ping();
-  }
+export class ForwardController {
+  constructor(private readonly forwardService: ForwardService) {}
 
   @Post('/forward-in')
   async newForwardIn(
