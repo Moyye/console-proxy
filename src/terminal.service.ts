@@ -16,6 +16,7 @@ import * as moment from 'moment';
 import { Undefinable } from 'tsdef';
 import * as isValidDomain from 'is-valid-domain';
 import * as dns from 'dns';
+import * as net from 'net';
 
 const lookup = promisify(dns.lookup);
 
@@ -35,8 +36,9 @@ enum KEYS {
 
 @Injectable()
 @WebSocketGateway()
-export class AppService
-  implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect {
+export class TerminalService
+  implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect
+{
   private logger: Logger = new Logger('WebsocketGateway');
 
   private connectionMap: Map<string, NodeSSH> = new Map();
@@ -69,10 +71,6 @@ export class AppService
     return connection.exec(command, parameters);
   }
 
-  ping(): string {
-    return 'pong';
-  }
-
   async getSftp(
     connectionId: string | null,
     connection?: NodeSSH,
@@ -92,7 +90,7 @@ export class AppService
 
     if (connection) {
       const sftp: unknown = await connection.requestSFTP();
-      const promiseSftp = AppService.sftpPromisify(sftp);
+      const promiseSftp = TerminalService.sftpPromisify(sftp);
       if (connectionId) {
         this.ftpMap.set(connectionId, promiseSftp);
       }
@@ -169,6 +167,7 @@ export class AppService
         username,
         port,
         tryKeyboard: true,
+        keepaliveInterval: 10000,
         ...(password && { password }),
         ...(privateKey && { privateKey }),
       }))!;
@@ -211,11 +210,17 @@ export class AppService
 
       this.logger.log(`[newTerminal] connected, server: ${username}@${host}`);
     } catch (error) {
-      this.logger.error('[newTerminal ] error', error.stack);
-      return false;
+      this.logger.error('[newTerminal] error', error.stack);
+      return {
+        success: false,
+        errorMessage: error.message,
+      };
     }
 
-    return true;
+    return {
+      success: true,
+      errorMessage: '',
+    };
   }
 
   @SubscribeMessage('terminal:close')
@@ -247,7 +252,7 @@ export class AppService
       if (!connection) {
         return { errorMessage: '无法连接' };
       }
-      const { stdout } = await AppService.execs(connection, 'pwd');
+      const { stdout } = await TerminalService.execs(connection, 'pwd');
       targetPath = stdout || '/';
     }
 
@@ -292,11 +297,11 @@ export class AppService
     }
 
     if (!path) {
-      const { stdout } = await AppService.execs(connection, 'pwd');
+      const { stdout } = await TerminalService.execs(connection, 'pwd');
       targetPath = stdout;
     }
 
-    const { stdout } = await AppService.execs(
+    const { stdout } = await TerminalService.execs(
       connection,
       `find ${targetPath} -type f -name "*${search}*" | head -20`,
     );
@@ -404,7 +409,7 @@ export class AppService
       tarFileStringArr.push(item.path);
       tarFileStringArr.push(item.filename);
     });
-    await AppService.exec(connection, 'tar', tarFileStringArr);
+    await TerminalService.exec(connection, 'tar', tarFileStringArr);
     const buffer = await sftp.readFile(tarFilename, {});
     sftp.unlink(tarFilename).then();
 
@@ -466,7 +471,7 @@ export class AppService
       return { errorMessage: '无法连接' };
     }
 
-    const { stderr } = await AppService.execs(
+    const { stderr } = await TerminalService.execs(
       connection,
       `rm -rf ${remotePath}`,
     );
@@ -602,7 +607,7 @@ export class AppService
 
       let nodePath = '';
       // 检查node是否已经安装
-      const nativeNode = await AppService.execs(connection, 'node -v');
+      const nativeNode = await TerminalService.execs(connection, 'node -v');
 
       if (
         nativeNode.stdout &&
@@ -614,7 +619,7 @@ export class AppService
 
       if (!nodePath) {
         // 初始化 node
-        const checkIsInitNode = await AppService.execs(
+        const checkIsInitNode = await TerminalService.execs(
           connection,
           '.terminal.icu/node/bin/node -v',
         );
@@ -623,7 +628,10 @@ export class AppService
         }
 
         if (!checkIsInitNode.stdout) {
-          await AppService.execs(connection, 'mkdir -p .terminal.icu/agent');
+          await TerminalService.execs(
+            connection,
+            'mkdir -p .terminal.icu/agent',
+          );
 
           this.logger.log('[initAgent] install node start');
           // 传送检查脚本
@@ -632,7 +640,7 @@ export class AppService
             '.terminal.icu/agent/detect-node.sh',
           );
 
-          const { stdout: nodeRelease, stderr } = await AppService.execs(
+          const { stdout: nodeRelease, stderr } = await TerminalService.execs(
             connection,
             'bash .terminal.icu/agent/detect-node.sh',
           );
@@ -646,7 +654,7 @@ export class AppService
 
           // 尝试外网安装，速度快，不限速
           this.logger.log(`[initAgent] install node use wget`);
-          const data = await AppService.execs(
+          const data = await TerminalService.execs(
             connection,
             'cd .terminal.icu' +
               `&& wget http://npm.taobao.org/mirrors/node/${nodeVersion}/${nodeRelease} -q`,
@@ -667,7 +675,7 @@ export class AppService
           }
 
           // 解压缩
-          const compressResult = await AppService.execs(
+          const compressResult = await TerminalService.execs(
             connection,
             'cd .terminal.icu' +
               `&& tar -xzf ${nodeRelease}` +
@@ -687,7 +695,7 @@ export class AppService
 
       // 初始化脚本
       try {
-        await AppService.execs(connection, 'mkdir -p .terminal.icu/agent');
+        await TerminalService.execs(connection, 'mkdir -p .terminal.icu/agent');
       } catch (e) {}
 
       await connection.putFiles(

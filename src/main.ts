@@ -14,3 +14,7 @@ async function bootstrap() {
   await app.listen(22334);
 }
 bootstrap().then();
+
+process.setUncaughtExceptionCaptureCallback((error) => {
+  console.log(error);
+});

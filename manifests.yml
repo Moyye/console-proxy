@@ -51,6 +51,8 @@ spec:
           env:
             - name: NODE_ENV
               value: 'production'
+            - name: RUNTIME_ENV
+              value: 'OFFICE'
             - name: PORT
               value: '30002'
             - name: TMP_SERVER
