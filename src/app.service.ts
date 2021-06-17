@@ -17,11 +17,11 @@ import { Undefinable } from 'tsdef';
 import * as isValidDomain from 'is-valid-domain';
 import * as dns from 'dns';
 import * as net from 'net';
-
-const lookup = promisify(dns.lookup);
-
 import { ConsoleSocket, SFTP } from './interface';
 import { decrypt, md5, sleep, WsErrorCatch } from './utils/kit';
+import { ForwardInParams } from './dto';
+
+const lookup = promisify(dns.lookup);
 
 enum KEYS {
   connectionId = '__id',
@@ -36,12 +36,14 @@ enum KEYS {
 
 @Injectable()
 @WebSocketGateway()
-export class TerminalService
+export class AppService
   implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect
 {
   private logger: Logger = new Logger('WebsocketGateway');
 
   private connectionMap: Map<string, NodeSSH> = new Map();
+
+  private forwardConnectionMap: Map<string, NodeSSH> = new Map();
 
   private shellMap: Map<string, ClientChannel> = new Map();
 
@@ -90,7 +92,7 @@ export class TerminalService
 
     if (connection) {
       const sftp: unknown = await connection.requestSFTP();
-      const promiseSftp = TerminalService.sftpPromisify(sftp);
+      const promiseSftp = AppService.sftpPromisify(sftp);
       if (connectionId) {
         this.ftpMap.set(connectionId, promiseSftp);
       }
@@ -252,7 +254,7 @@ export class TerminalService
       if (!connection) {
         return { errorMessage: '无法连接' };
       }
-      const { stdout } = await TerminalService.execs(connection, 'pwd');
+      const { stdout } = await AppService.execs(connection, 'pwd');
       targetPath = stdout || '/';
     }
 
@@ -297,11 +299,11 @@ export class TerminalService
     }
 
     if (!path) {
-      const { stdout } = await TerminalService.execs(connection, 'pwd');
+      const { stdout } = await AppService.execs(connection, 'pwd');
       targetPath = stdout;
     }
 
-    const { stdout } = await TerminalService.execs(
+    const { stdout } = await AppService.execs(
       connection,
       `find ${targetPath} -type f -name "*${search}*" | head -20`,
     );
@@ -409,7 +411,7 @@ export class TerminalService
       tarFileStringArr.push(item.path);
       tarFileStringArr.push(item.filename);
     });
-    await TerminalService.exec(connection, 'tar', tarFileStringArr);
+    await AppService.exec(connection, 'tar', tarFileStringArr);
     const buffer = await sftp.readFile(tarFilename, {});
     sftp.unlink(tarFilename).then();
 
@@ -471,7 +473,7 @@ export class TerminalService
       return { errorMessage: '无法连接' };
     }
 
-    const { stderr } = await TerminalService.execs(
+    const { stderr } = await AppService.execs(
       connection,
       `rm -rf ${remotePath}`,
     );
@@ -498,6 +500,148 @@ export class TerminalService
     return {
       data: true,
     };
+  }
+
+  ping(): string {
+    return 'pong';
+  }
+
+  async newForwardIn({
+    id,
+    host,
+    username,
+    password = '',
+    privateKey = '',
+    port = 22,
+    remotePort,
+    localAddr,
+    localPort,
+  }) {
+    // 已经处理过，不再处理
+    if (this.forwardConnectionMap.get(id)) {
+      return { success: true, errorMessage: '' };
+    }
+
+    try {
+      if (isValidDomain(host, { allowUnicode: true })) {
+        try {
+          const { address } = await lookup(host);
+          host = address;
+        } catch (e) {
+          // nothing
+        }
+      }
+
+      const connection = await this.forwardIn({
+        id,
+        config: {
+          host: host === 'linuxServer' ? process.env.TMP_SERVER : host,
+          username,
+          port,
+          tryKeyboard: true,
+          ...(password && { password }),
+          ...(privateKey && { privateKey }),
+          keepaliveInterval: 10000,
+        },
+        remoteAddr: host,
+        remotePort,
+        localAddr,
+        localPort,
+      });
+
+      this.forwardConnectionMap.set(id, connection);
+
+      this.logger.log(`[newForwardOut] connected, server: ${username}@${host}`);
+    } catch (error) {
+      this.logger.error('[newForwardOut] error', error.stack);
+      return { success: false, errorMessage: error.message };
+    }
+
+    return { success: true, errorMessage: '' };
+  }
+
+  async forwardIn(params: ForwardInParams) {
+    return new Promise<NodeSSH>(async (resolve, reject) => {
+      try {
+        const { id, config, remoteAddr, remotePort, localAddr, localPort } =
+          params;
+
+        const connection = await new NodeSSH().connect(config);
+
+        _.set(connection, '_config', params);
+
+        connection.connection?.on('error', (error) => {
+          this.logger.error('connection server error', error.stack);
+        });
+        connection.connection?.on('close', () => {
+          this.logger.warn('connection close, and retry forward');
+          setTimeout(async () => {
+            // 移除原来的
+            connection.dispose();
+            this.forwardConnectionMap.delete(id);
+
+            // 重新连接
+            this.forwardConnectionMap.set(id, await this.forwardIn(params));
+          }, 1000);
+        });
+
+        connection.connection.forwardIn(remoteAddr, remotePort, (err) => {
+          if (err) {
+            if (connection.connection) {
+              connection.connection.removeAllListeners('close');
+            }
+            connection.dispose();
+            this.logger.error(err);
+            this.forwardConnectionMap.delete(id);
+            reject(err);
+            return;
+          }
+          this.logger.log(
+            `forwardIn success, server: ${remoteAddr}:${remotePort} => ${localAddr}:${localPort}`,
+          );
+          resolve(connection);
+          this.forwardConnectionMap.set(id, connection);
+        });
+
+        connection.connection.on('tcp connection', (info, accept) => {
+          const stream = accept().pause();
+          const socket = net.connect(localPort, localAddr, function () {
+            socket.on('error', (error) => {
+              console.log('forward tcp error', error);
+            });
+            stream.pipe(socket);
+            socket.pipe(stream);
+            stream.resume();
+          });
+        });
+      } catch (error) {
+        reject(error);
+      }
+    });
+  }
+
+  //  分割线
+
+  unForward(id: string) {
+    const connection = this.forwardConnectionMap.get(id);
+    if (connection) {
+      const config: ForwardInParams = _.get(connection, '_config');
+      connection.connection.removeAllListeners('close');
+      connection.connection.unforwardIn(config.remoteAddr, config.remotePort);
+      connection.dispose();
+      this.forwardConnectionMap.delete(id);
+      this.logger.log('unForward success');
+    }
+  }
+
+  forwardStatus() {
+    const status: Record<string, boolean> = {};
+
+    this.forwardConnectionMap.forEach((connection, id) => {
+      status[id] = connection.isConnected();
+    });
+
+    return status;
   }
 
   private async getConnection(
@@ -607,7 +751,7 @@ export class TerminalService
 
       let nodePath = '';
       // 检查node是否已经安装
-      const nativeNode = await TerminalService.execs(connection, 'node -v');
+      const nativeNode = await AppService.execs(connection, 'node -v');
 
       if (
         nativeNode.stdout &&
@@ -619,7 +763,7 @@ export class TerminalService
 
       if (!nodePath) {
         // 初始化 node
-        const checkIsInitNode = await TerminalService.execs(
+        const checkIsInitNode = await AppService.execs(
           connection,
           '.terminal.icu/node/bin/node -v',
         );
@@ -628,10 +772,7 @@ export class TerminalService
         }
 
         if (!checkIsInitNode.stdout) {
-          await TerminalService.execs(
-            connection,
-            'mkdir -p .terminal.icu/agent',
-          );
+          await AppService.execs(connection, 'mkdir -p .terminal.icu/agent');
 
           this.logger.log('[initAgent] install node start');
           // 传送检查脚本
@@ -640,7 +781,7 @@ export class TerminalService
             '.terminal.icu/agent/detect-node.sh',
           );
 
-          const { stdout: nodeRelease, stderr } = await TerminalService.execs(
+          const { stdout: nodeRelease, stderr } = await AppService.execs(
             connection,
             'bash .terminal.icu/agent/detect-node.sh',
           );
@@ -654,7 +795,7 @@ export class TerminalService
 
           // 尝试外网安装，速度快，不限速
           this.logger.log(`[initAgent] install node use wget`);
-          const data = await TerminalService.execs(
+          const data = await AppService.execs(
             connection,
             'cd .terminal.icu' +
               `&& wget http://npm.taobao.org/mirrors/node/${nodeVersion}/${nodeRelease} -q`,
@@ -675,7 +816,7 @@ export class TerminalService
           }
 
           // 解压缩
-          const compressResult = await TerminalService.execs(
+          const compressResult = await AppService.execs(
             connection,
             'cd .terminal.icu' +
               `&& tar -xzf ${nodeRelease}` +
@@ -695,7 +836,7 @@ export class TerminalService
 
       // 初始化脚本
       try {
-        await TerminalService.execs(connection, 'mkdir -p .terminal.icu/agent');
+        await AppService.execs(connection, 'mkdir -p .terminal.icu/agent');
       } catch (e) {}
 
       await connection.putFiles(
