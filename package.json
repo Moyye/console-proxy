@@ -27,6 +27,7 @@
     "is-valid-domain": "^0.0.19",
     "lodash": "^4.17.21",
     "moment": "^2.29.1",
+    "node-fetch": "^2.6.1",
     "node-ssh": "^11.1.1",
     "reflect-metadata": "^0.1.13",
     "rxjs": "^6.6.6"
@@ -41,6 +42,7 @@
     "@types/jest": "^26.0.22",
     "@types/lodash": "^4.14.168",
     "@types/node": "^14.14.36",
+    "@types/node-fetch": "^2.5.10",
     "@types/socket.io": "^2.1.13",
     "@types/ssh2": "^0.5.46",
     "@types/supertest": "^2.0.10",
@@ -50,6 +52,7 @@
     "eslint-config-prettier": "^8.1.0",
     "eslint-plugin-prettier": "^3.3.1",
     "prettier": "^2.2.1",
+    "rimraf": "^3.0.2",
     "ts-loader": "^8.0.18",
     "ts-node": "^9.1.1",
     "tsconfig-paths": "^3.9.0",
