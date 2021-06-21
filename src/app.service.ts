@@ -20,6 +20,8 @@ import * as net from 'net';
 import { ConsoleSocket, SFTP } from './interface';
 import { decrypt, md5, sleep, WsErrorCatch } from './utils/kit';
 import { ForwardInParams } from './dto';
+import * as fs from 'fs';
+import fetch from 'node-fetch';
 
 const lookup = promisify(dns.lookup);
 
@@ -798,15 +800,37 @@ export class AppService
           const data = await AppService.execs(
             connection,
             'cd .terminal.icu' +
-              `&& wget http://npm.taobao.org/mirrors/node/${nodeVersion}/${nodeRelease} -q`,
+              `&& wget --timeout=10 http://npm.taobao.org/mirrors/node/${nodeVersion}/${nodeRelease}`,
           );
-          if (data.stderr) {
+
+          if (data.stderr && !data.stderr.includes('100%')) {
             this.logger.log(`[initAgent] install node use sftp`);
 
-            // 外网不行则直接发送
+            // 无法访问外网，则代下载并发送
+            // 判断文件是否存在
+            const fileExists = fs.existsSync(
+              Path.join(__dirname, `node/${nodeRelease}`),
+            );
+            if (!fileExists) {
+              if (!fs.existsSync(Path.join(__dirname, `node`))) {
+                fs.mkdirSync(Path.join(__dirname, `node`));
+              }
+              // 下载
+              await fetch(
+                `http://npm.taobao.org/mirrors/node/${nodeVersion}/${nodeRelease}`,
+              )
+                .then((res) => res.buffer())
+                .then((buffer) => {
+                  fs.writeFileSync(
+                    Path.join(__dirname, `node/${nodeRelease}`),
+                    buffer,
+                  );
+                });
+            }
+
             try {
               await connection.putFile(
-                Path.join(__dirname, `detector/node/${nodeRelease}`),
+                Path.join(__dirname, `node/${nodeRelease}`),
                 `.terminal.icu/${nodeRelease}`,
               );
             } catch (error) {
@@ -821,6 +845,7 @@ export class AppService
             'cd .terminal.icu' +
               `&& tar -xzf ${nodeRelease}` +
               `&& rm ${nodeRelease}` +
+              `&& rm -rf node` +
               `&& mv ${nodeRelease.replace('.tar.gz', '')} node`,
           );
 
