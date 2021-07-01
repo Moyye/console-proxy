@@ -1,7 +1,7 @@
 import * as fs from 'fs';
-import fsPath from 'path';
-import makeDir from 'make-dir';
-import shellEscape from 'shell-escape';
+import * as fsPath from 'path';
+import * as makeDir from 'make-dir';
+import * as shellEscape from 'shell-escape';
 import scanDirectory from 'sb-scandir';
 import { PromiseQueue } from 'sb-promise-queue';
 import * as invariant from 'assert';
