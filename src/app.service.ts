@@ -985,7 +985,11 @@ export class AppService
           databases: Number.parseInt(databases),
           keyspace: _.pick(redisInfoParser(keyspace), ['databases']),
           cpu: _.pick(parseInfo, ['used_cpu_sys', 'used_cpu_user']),
-          memory: _.pick(parseInfo, ['maxmemory', 'used_memory']),
+          memory: _.pick(parseInfo, [
+            'maxmemory',
+            'used_memory',
+            'total_system_memory',
+          ]),
           server: _.pick(parseInfo, ['redis_version', 'uptime_in_days']),
           clients: _.pick(parseInfo, ['connected_clients', 'blocked_clients']),
           time: Date.now(),
