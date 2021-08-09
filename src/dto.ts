@@ -1,4 +1,4 @@
-import { Config as ConnectionConfig } from 'node-ssh';
+import { Config as ConnectionConfig } from './utils/nodeSSH';
 
 export interface ForwardInParams {
   id: string;

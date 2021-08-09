@@ -9,7 +9,7 @@ import {
 } from '@nestjs/websockets';
 import { promisify } from 'util';
 import * as Path from 'path';
-import { Config as ConnectionConfig, NodeSSH } from 'node-ssh';
+import { Config as ConnectionConfig, NodeSSH } from './utils/nodeSSH';
 import { ClientChannel } from 'ssh2';
 import * as _ from 'lodash';
 import * as moment from 'moment';
@@ -22,11 +22,13 @@ import { decrypt, md5, sleep, WsErrorCatch } from './utils/kit';
 import { ForwardInParams } from './dto';
 import * as fs from 'fs';
 import fetch from 'node-fetch';
+import IORedis from 'ioredis';
+import { parse as redisInfoParser } from 'redis-info';
 
 const lookup = promisify(dns.lookup);
 
 enum KEYS {
-  connectionId = '__id',
+  connectionId = '_connectionId',
   socket = '_socket',
   sftp = '_sftp',
   statusShell = '_statusShell',
@@ -34,13 +36,14 @@ enum KEYS {
   shellMap = '_shellMap',
   connectionMap = '_connectionMap',
   clearConnectionTimeoutHolder = '_clearConnectionTimeoutHolder',
+  redisId = '_redisId',
+  redisMap = '_redisMap',
 }
 
 @Injectable()
 @WebSocketGateway()
 export class AppService
-  implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect
-{
+  implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect {
   private logger: Logger = new Logger('WebsocketGateway');
 
   private connectionMap: Map<string, NodeSSH> = new Map();
@@ -50,6 +53,8 @@ export class AppService
   private shellMap: Map<string, ClientChannel> = new Map();
 
   private ftpMap: Map<string, SFTP> = new Map();
+
+  private redisMap: Map<string, IORedis.Redis> = new Map();
 
   static sftpPromisify(sftpClient) {
     ['readdir', 'readFile', 'writeFile', 'rename', 'unlink', 'rmdir'].forEach(
@@ -122,13 +127,29 @@ export class AppService
 
   handleDisconnect(socket: ConsoleSocket) {
     socket.removeAllListeners();
+
+    // 断开 SSH
     const connectionMap: Record<string, NodeSSH> = _.get(
       socket,
       KEYS.connectionMap,
     );
+
     if (connectionMap) {
       for (const connection of Object.values(connectionMap)) {
         this.clearConnection(connection);
+      }
+    }
+
+    // 断开 REDIS
+    const redisMap: Record<string, IORedis.Redis> = _.get(
+      socket,
+      KEYS.redisMap,
+    );
+
+    if (redisMap) {
+      for (const redis of Object.values(redisMap).filter(Boolean)) {
+        redis.quit();
+        this.redisMap.delete(_.get(redis, KEYS.redisId));
       }
     }
 
@@ -144,6 +165,51 @@ export class AppService
   async handleConnection(socket: ConsoleSocket): Promise<void> {
     socket.emit('login');
     this.logger.log(`Client connected, socketId: ${socket.id}`);
+  }
+
+  @SubscribeMessage('terminal:preConnect')
+  @WsErrorCatch()
+  async preSSHConnect(
+    socket: ConsoleSocket,
+    { host, username, password = '', privateKey = '', port = 22 },
+  ) {
+    const secretKey = md5(`${host}${username}${port}`).toString();
+
+    if (password) {
+      password = decrypt(password, secretKey);
+    }
+    if (privateKey) {
+      privateKey = decrypt(privateKey, secretKey);
+    }
+
+    const connectionId = md5(
+      `${host}${username}${port}${password}${privateKey}`,
+    ).toString();
+
+    try {
+      await this.getConnection(connectionId, {
+        host: host === 'linuxServer' ? process.env.TMP_SERVER : host,
+        username,
+        port,
+        tryKeyboard: true,
+        keepaliveInterval: 10000,
+        ...(password && { password }),
+        ...(privateKey && { privateKey }),
+      });
+
+      this.logger.log(`[preConnect] connected, server: ${username}@${host}`);
+    } catch (error) {
+      this.logger.error('[preConnect] error', error.stack);
+      return {
+        success: false,
+        errorMessage: error.message,
+      };
+    }
+
+    return {
+      success: true,
+      errorMessage: '',
+    };
   }
 
   @SubscribeMessage('terminal:new')
@@ -509,16 +575,16 @@ export class AppService
   }
 
   async newForwardIn({
-    id,
-    host,
-    username,
-    password = '',
-    privateKey = '',
-    port = 22,
-    remotePort,
-    localAddr,
-    localPort,
-  }) {
+                       id,
+                       host,
+                       username,
+                       password = '',
+                       privateKey = '',
+                       port = 22,
+                       remotePort,
+                       localAddr,
+                       localPort,
+                     }) {
     // 已经处理过，不再处理
     if (this.forwardConnectionMap.get(id)) {
       return { success: true, errorMessage: '' };
@@ -607,7 +673,7 @@ export class AppService
 
         connection.connection.on('tcp connection', (info, accept) => {
           const stream = accept().pause();
-          const socket = net.connect(localPort, localAddr, function () {
+          const socket = net.connect(localPort, localAddr, function() {
             socket.on('error', (error) => {
               console.log('forward tcp error', error);
             });
@@ -621,8 +687,6 @@ export class AppService
       }
     });
   }
-
-  //  分割线
 
   unForward(id: string) {
     const connection = this.forwardConnectionMap.get(id);
@@ -646,6 +710,293 @@ export class AppService
     return status;
   }
 
+  //  分割线
+  @SubscribeMessage('redis:connect')
+  @WsErrorCatch()
+  async redisConnect(
+    socket: ConsoleSocket,
+    { id, initKeys = true, host, port = 6379, password, ...config },
+  ) {
+    this.logger.log(`[newRedis] start ${id} initKeys: ${initKeys} ${host}`);
+    let redis: IORedis.Redis;
+
+    redis = this.redisMap.get(id);
+    if (redis) {
+      this.logger.log('[newRedis] connecting');
+      // 正在连接
+    } else {
+      this.logger.log('[newRedis] new redis');
+
+      // 新建连接
+      const secretKey = md5(`${host}${port}`).toString();
+      if (password) {
+        password = decrypt(password, secretKey);
+      }
+
+      try {
+        await new Promise((resolve, reject) => {
+          redis = new IORedis({
+            ...config,
+            host,
+            port,
+            password,
+          });
+          redis.on('error', async (error) => {
+            this.logger.log(`[newRedis] error event ${error.message}`);
+            await redis.quit();
+            reject(error);
+          });
+          redis.on('connect', () => {
+            this.logger.log(`[newRedis] connect success event`);
+            resolve(redis);
+          });
+          redis.on('close', () => {
+            this.logger.log(`[newRedis] close event`);
+          });
+        });
+      } catch (error) {
+        this.logger.log(`[newRedis] error ${error.message}`);
+        return {
+          success: false,
+          errorMessage: error.message,
+        };
+      }
+      this.redisMap.set(id, redis);
+      _.set(redis, KEYS.redisId, id);
+      _.set(socket, `${KEYS.redisMap}.${id}`, redis);
+    }
+
+    return {
+      success: true,
+      data: initKeys ? (await this.redisKeys({ match: '*', id })).data : [],
+    };
+  }
+
+  @SubscribeMessage('redis:disConnect')
+  @WsErrorCatch()
+  async redisDisConnect(socket: ConsoleSocket, { id }) {
+    this.logger.log(`redis:disConnect`);
+    const redis = this.redisMap.get(id);
+    this.redisMap.delete(id);
+    _.set(socket, `${KEYS.redisMap}.${id}`, undefined);
+    if (redis) {
+      redis.removeAllListeners();
+      await redis.quit();
+    }
+
+    return {
+      success: true,
+    };
+  }
+
+  @SubscribeMessage('redis:deleteKey')
+  @WsErrorCatch()
+  async deleteRedisKey(
+    @MessageBody() { id, refreshKeys = true, keys, match, count, method },
+  ) {
+    this.logger.log('redis:deleteKey start', keys.map((v) => v.key).join(','));
+    const redis = this.redisMap.get(id);
+    if (!redis) {
+      return { errorMessage: 'redis 已断开连接' };
+    }
+
+    method = method === 'unlink' ? 'unlink' : 'del';
+
+    await Promise.all([
+      // 普通的 key
+      Promise.all(
+        keys.filter((v) => v.isLeaf).map((v) => redis[method](v.key).catch()),
+      ),
+      // 前缀 key
+      Promise.all(
+        keys
+          .filter((v) => !v.isLeaf)
+          .map((v) => {
+            return new Promise((resolve) => {
+              if (!v.key) {
+                resolve(true);
+                return;
+              }
+
+              const stream = redis.scanStream({
+                match: `${v.key}:*`,
+                count: 50,
+              });
+
+              stream.on('data', async (resultKeys) => {
+                stream.pause();
+                await Promise.all(resultKeys.map((key) => redis[method](key)));
+                stream.resume();
+              });
+              stream.on('end', () => resolve(true));
+              stream.on('error', () => resolve(true));
+            });
+          }),
+      ),
+    ]);
+
+    return {
+      success: true,
+      data: refreshKeys
+        ? (await this.redisKeys({ match, id, count })).data
+        : [],
+    };
+  }
+
+  @SubscribeMessage('redis:keys')
+  @WsErrorCatch()
+  async redisKeys(@MessageBody() { id, match, needType = true, count = 500 }) {
+    const redis = this.redisMap.get(id);
+    if (!redis) {
+      return { errorMessage: 'redis 已断开连接', data: [] };
+    }
+
+    let cursor: undefined | string = undefined;
+    const result: string[] = [];
+    while (cursor !== '0' && result.length < count) {
+      const [currentCursor, currentResult] = await redis.scan(
+        cursor || '0',
+        'match',
+        match || '*',
+        'count',
+        50,
+      );
+
+      cursor = currentCursor;
+      result.push(...currentResult);
+    }
+
+    const keys = _.uniq(_.flatten(result));
+    if (!needType) {
+      return {
+        success: true,
+        data: keys.map((v) => ({ key: v })),
+      };
+    }
+
+    const pipeline = redis.pipeline();
+    keys.forEach((key) => pipeline.type(key));
+    const types = await pipeline.exec();
+    return {
+      success: true,
+      data: keys.map((key, index) => ({
+        key,
+        type: types[index][1],
+      })),
+    };
+  }
+
+  @SubscribeMessage('redis:hscan')
+  @WsErrorCatch()
+  async redisHScan(@MessageBody() { id, match, key, count = 500 }) {
+    const redis = this.redisMap.get(id);
+    if (!redis) {
+      return { errorMessage: 'redis 已断开连接' };
+    }
+
+    let cursor: undefined | string = undefined;
+    const result: string[] = [];
+    while (cursor !== '0' && result.length / 2 < count) {
+      const [currentCursor, currentResult] = await redis.hscan(
+        key,
+        cursor || '0',
+        'match',
+        match || '*',
+        'count',
+        50,
+      );
+
+      cursor = currentCursor;
+      result.push(...currentResult);
+    }
+
+    return {
+      success: true,
+      data: result,
+    };
+  }
+
+  @SubscribeMessage('redis:sscan')
+  @WsErrorCatch()
+  async redisSScan(@MessageBody() { id, match, key, count = 500 }) {
+    const redis = this.redisMap.get(id);
+    if (!redis) {
+      return { errorMessage: 'redis 已断开连接' };
+    }
+
+    let cursor: undefined | string = undefined;
+    const result: string[] = [];
+    while (cursor !== '0' && result.length < count) {
+      const [currentCursor, currentResult] = await redis.sscan(
+        key,
+        cursor || '0',
+        'match',
+        match || '*',
+        'count',
+        50,
+      );
+
+      cursor = currentCursor;
+      result.push(...currentResult);
+    }
+
+    return {
+      success: true,
+      data: result,
+    };
+  }
+
+  @SubscribeMessage('redis:command')
+  @WsErrorCatch()
+  async redisCommand(@MessageBody() { id, command, params }) {
+    const redis = this.redisMap.get(id);
+    if (!redis) {
+      return { errorMessage: 'redis disconnect' };
+    }
+
+    try {
+      const data = await redis[command](...params);
+      return { success: true, data };
+    } catch (e) {
+      this.logger.error(e, 'redis:command');
+      return { errorMessage: e.message };
+    }
+  }
+
+  @SubscribeMessage('redis:info')
+  @WsErrorCatch()
+  async redisInfo(@MessageBody() { id }) {
+    const redis = this.redisMap.get(id);
+    if (!redis) {
+      return { errorMessage: 'redis disconnect' };
+    }
+    try {
+      const [[, keyspace], [, info], [, [, databases]]] = await redis
+        .pipeline()
+        .info('keyspace')
+        .info()
+        .config('get', 'databases')
+        .exec();
+      const parseInfo = redisInfoParser(info);
+      return {
+        success: true,
+        data: {
+          databases: Number.parseInt(databases),
+          keyspace: _.pick(redisInfoParser(keyspace), ['databases']),
+          cpu: _.pick(parseInfo, ['used_cpu_sys', 'used_cpu_user']),
+          memory: _.pick(parseInfo, ['maxmemory', 'used_memory']),
+          server: _.pick(parseInfo, ['redis_version', 'uptime_in_days']),
+          clients: _.pick(parseInfo, ['connected_clients', 'blocked_clients']),
+          time: Date.now(),
+        },
+      };
+    } catch (e) {
+      this.logger.error(e, 'redis:command');
+      return { errorMessage: e.message };
+    }
+  }
+
+  //  分割线
   private async getConnection(
     connectId: string,
     config?: ConnectionConfig,
@@ -679,7 +1030,70 @@ export class AppService
           // nothing
         }
       }
-      const connection = await new NodeSSH().connect(config);
+      const connection = await new NodeSSH().connect({
+        ...config,
+        algorithms: {
+          kex: [
+            'curve25519-sha256',
+            'curve25519-sha256@libssh.org',
+            'ecdh-sha2-nistp256',
+            'ecdh-sha2-nistp384',
+            'ecdh-sha2-nistp521',
+            'diffie-hellman-group-exchange-sha256',
+            'diffie-hellman-group14-sha256',
+            'diffie-hellman-group15-sha512',
+            'diffie-hellman-group16-sha512',
+            'diffie-hellman-group17-sha512',
+            'diffie-hellman-group18-sha512',
+            'diffie-hellman-group-exchange-sha1',
+            'diffie-hellman-group14-sha1',
+            'diffie-hellman-group1-sha1',
+          ],
+          serverHostKey: [
+            'ssh-ed25519',
+            'ecdsa-sha2-nistp256',
+            'ecdsa-sha2-nistp384',
+            'ecdsa-sha2-nistp521',
+            'rsa-sha2-512',
+            'rsa-sha2-256',
+            'ssh-rsa',
+            'ssh-dss',
+          ],
+          cipher: [
+            'chacha20-poly1305@openssh.com',
+            'aes128-gcm',
+            'aes128-gcm@openssh.com',
+            'aes256-gcm',
+            'aes256-gcm@openssh.com',
+            'aes128-ctr',
+            'aes192-ctr',
+            'aes256-ctr',
+            '3des-cbc',
+            'aes256-cbc',
+            'aes192-cbc',
+            'aes128-cbc',
+            'arcfour256',
+            'arcfour128',
+            'arcfour',
+            'blowfish-cbc',
+            'cast128-cbc',
+          ],
+          hmac: [
+            'hmac-sha2-256-etm@openssh.com',
+            'hmac-sha2-512-etm@openssh.com',
+            'hmac-sha1-etm@openssh.com',
+            'hmac-sha2-256',
+            'hmac-sha2-512',
+            'hmac-sha1',
+            'hmac-md5',
+            'hmac-sha2-256-96',
+            'hmac-sha2-512-96',
+            'hmac-ripemd160',
+            'hmac-sha1-96',
+            'hmac-md5-96',
+          ],
+        },
+      });
 
       connection.connection?.on('error', (error) => {
         this.logger.error('connection server error', error.stack);
@@ -747,6 +1161,7 @@ export class AppService
   }
 
   private async initAgent(connection: NodeSSH) {
+    this.logger.log('[initAgent] start');
     try {
       if (_.get(connection, '_initAgentLock')) return;
       _.set(connection, '_initAgentLock', true);
@@ -758,7 +1173,7 @@ export class AppService
       if (
         nativeNode.stdout &&
         Number.parseInt(nativeNode.stdout.replace('v', '').split('.')[0], 10) >=
-          8
+        8
       ) {
         nodePath = 'node';
       }
@@ -800,7 +1215,7 @@ export class AppService
           const data = await AppService.execs(
             connection,
             'cd .terminal.icu' +
-              `&& wget --timeout=10 http://npm.taobao.org/mirrors/node/${nodeVersion}/${nodeRelease}`,
+            `&& wget --timeout=10 http://npm.taobao.org/mirrors/node/${nodeVersion}/${nodeRelease}`,
           );
 
           if (data.stderr && !data.stderr.includes('100%')) {
@@ -843,10 +1258,10 @@ export class AppService
           const compressResult = await AppService.execs(
             connection,
             'cd .terminal.icu' +
-              `&& tar -xzf ${nodeRelease}` +
-              `&& rm ${nodeRelease}` +
-              `&& rm -rf node` +
-              `&& mv ${nodeRelease.replace('.tar.gz', '')} node`,
+            `&& tar -xzf ${nodeRelease}` +
+            `&& rm ${nodeRelease}` +
+            `&& rm -rf node` +
+            `&& mv ${nodeRelease.replace('.tar.gz', '')} node`,
           );
 
           if (!compressResult.stderr) {
@@ -862,7 +1277,8 @@ export class AppService
       // 初始化脚本
       try {
         await AppService.execs(connection, 'mkdir -p .terminal.icu/agent');
-      } catch (e) {}
+      } catch (e) {
+      }
 
       await connection.putFiles(
         [
@@ -889,6 +1305,7 @@ export class AppService
         //   console.log(data.toString());
         // });
       }
+      this.logger.log('[initAgent] done');
     } catch (error) {
       this.logger.error('[initAgent] error', error.stack);
     }
