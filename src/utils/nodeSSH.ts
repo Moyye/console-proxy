@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/ban-ts-comment */
 import * as fs from 'fs';
 import * as fsPath from 'path';
 import * as makeDir from 'make-dir';
@@ -7,11 +8,11 @@ import { PromiseQueue } from 'sb-promise-queue';
 import * as invariant from 'assert';
 import * as SSH2 from 'ssh2';
 import {
-  ConnectConfig,
   ClientChannel,
-  SFTPWrapper,
+  ConnectConfig,
   ExecOptions,
   PseudoTtyOptions,
+  SFTPWrapper,
   ShellOptions,
 } from 'ssh2';
 
@@ -55,6 +56,7 @@ export interface SSHPutFilesOptions {
   sftp?: SFTPWrapper | null;
   concurrency?: number;
   transferOptions?: TransferOptions;
+  tick?: (localFile: string, remoteFile: string, error: Error | null) => void;
 }
 
 export interface SSHGetPutDirectoryOptions extends SSHPutFilesOptions {
@@ -662,6 +664,7 @@ export class NodeSSH {
       concurrency = DEFAULT_CONCURRENCY,
       sftp: givenSftp = null,
       transferOptions = {},
+      tick = DEFAULT_TICK,
     }: SSHPutFilesOptions = {},
   ): Promise<void> {
     invariant(Array.isArray(files), 'files must be an array');
@@ -688,15 +691,48 @@ export class NodeSSH {
         files.forEach((file) => {
           queue
             .add(async () => {
-              await this.putFile(
-                file.local,
-                file.remote,
-                sftp,
-                transferOptions,
-              );
+              let beforeTotalTransferred = 0;
+              await this.putFile(file.local, file.remote, sftp, {
+                ...transferOptions,
+                step: (
+                  total_transferred: number,
+                  chunk: number,
+                  total: number,
+                ) => {
+                  if (transferOptions.step) {
+                    if (total_transferred === total) {
+                      transferOptions.step(
+                        total_transferred,
+                        chunk,
+                        total,
+                        // @ts-ignore
+                        file.local,
+                      );
+                      return;
+                    }
+                    if (
+                      (total_transferred - beforeTotalTransferred) / total >
+                      0.03
+                    ) {
+                      transferOptions.step(
+                        total_transferred,
+                        chunk,
+                        total,
+                        // @ts-ignore
+                        file.local,
+                      );
+                      beforeTotalTransferred = total_transferred;
+                    }
+                  }
+                },
+              });
+              tick(file.local, file.remote, null);
               transferred.push(file);
             })
-            .catch(reject);
+            .catch((error) => {
+              reject(error);
+              tick(file.local, file.remote, error);
+            });
         });
 
         queue.waitTillIdle().then(resolve);
@@ -796,13 +832,42 @@ export class NodeSSH {
             .add(async () => {
               const localFile = fsPath.join(localDirectory, file);
               const remoteFile = fsPath.join(remoteDirectory, file);
+              let beforeTotalTransferred = 0;
               try {
-                await this.putFile(
-                  localFile,
-                  remoteFile,
-                  sftp,
-                  transferOptions,
-                );
+                await this.putFile(localFile, remoteFile, sftp, {
+                  ...transferOptions,
+                  step: (
+                    total_transferred: number,
+                    chunk: number,
+                    total: number,
+                  ) => {
+                    if (transferOptions.step) {
+                      if (total_transferred === total) {
+                        transferOptions.step(
+                          total_transferred,
+                          chunk,
+                          total,
+                          // @ts-ignore
+                          localFile,
+                        );
+                        return;
+                      }
+                      if (
+                        (total_transferred - beforeTotalTransferred) / total >
+                        0.03
+                      ) {
+                        transferOptions.step(
+                          total_transferred,
+                          chunk,
+                          total,
+                          // @ts-ignore
+                          localFile,
+                        );
+                        beforeTotalTransferred = total_transferred;
+                      }
+                    }
+                  },
+                });
                 tick(localFile, remoteFile, null);
               } catch (_) {
                 failed = true;

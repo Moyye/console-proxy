@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/ban-ts-comment */
 import { Injectable, Logger } from '@nestjs/common';
 import {
   MessageBody,
@@ -300,7 +301,6 @@ export class AppService
     const shell = await this.getShell(id);
     if (shell) {
       const connection: NodeSSH = _.get(shell, KEYS.connection);
-      // const socket: ConsoleSocket = _.get(connection, KEYS.socket);
       const sshMap: Record<string, NodeSSH> = _.get(connection, KEYS.shellMap);
 
       shell.close();
@@ -435,13 +435,84 @@ export class AppService
 
   @SubscribeMessage('file:writeFile')
   @WsErrorCatch()
-  async writeFile(@MessageBody() { id, data: { remotePath, buffer } }) {
+  async writeFile(socket: ConsoleSocket, { id, data: { remotePath, buffer } }) {
     const sftp = await this.getSftp(id);
     if (!sftp) {
       return { errorMessage: '无法连接' };
     }
 
+    socket.emit(`file:uploaded:${id}`, {
+      filepath: Path.basename(remotePath),
+      process: 0.01,
+    });
     await sftp.writeFile(remotePath, buffer);
+    socket.emit(`file:uploaded:${id}`, {
+      filepath: Path.basename(remotePath),
+      process: 1,
+    });
+
+    return {
+      data: true,
+    };
+  }
+
+  @SubscribeMessage('file:writeFileByPath')
+  @WsErrorCatch()
+  async writeFileBypath(
+    socket: ConsoleSocket,
+    { id, data: { localDirectory, remoteDirectory } },
+  ) {
+    const connection = await this.getConnection(id);
+    if (!connection) {
+      return { errorMessage: '无法连接' };
+    }
+
+    await connection.putDirectory(localDirectory, remoteDirectory, {
+      concurrency: 5,
+      transferOptions: {
+        // @ts-ignore
+        step: (
+          total_transferred: number,
+          chunk: number,
+          total: number,
+          localFile: string,
+        ) => {
+          socket.emit(`file:uploaded:${id}`, {
+            filepath: localFile,
+            process: Number.parseFloat((total_transferred / total).toFixed(3)),
+          });
+        },
+      },
+    });
+    return {
+      data: true,
+    };
+  }
+
+  @SubscribeMessage('file:writeFiles')
+  @WsErrorCatch()
+  async writeFiles(socket: ConsoleSocket, { id, data: { files } }) {
+    const connection = await this.getConnection(id);
+    if (!connection) {
+      return { errorMessage: '无法连接' };
+    }
+    await connection.putFiles(files, {
+      concurrency: 5,
+      transferOptions: {
+        // @ts-ignore
+        step: (
+          total_transferred: number,
+          chunk: number,
+          total: number,
+          localFile: string,
+        ) => {
+          socket.emit(`file:uploaded:${id}`, {
+            filepath: localFile,
+            process: Number.parseFloat((total_transferred / total).toFixed(3)),
+          });
+        },
+      },
+    });
 
     return {
       data: true,
