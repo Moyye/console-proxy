@@ -473,7 +473,7 @@ export class NodeSSH {
     );
     invariant(
       options.stream == null ||
-        ['both', 'stdout', 'stderr'].includes(options.stream),
+      ['both', 'stdout', 'stderr'].includes(options.stream),
       'options.stream must be one of both, stdout, stderr',
     );
     for (let i = 0, { length } = parameters; i < length; i += 1) {
@@ -584,6 +584,97 @@ export class NodeSSH {
           },
         );
       });
+    } finally {
+      if (!givenSftp) {
+        sftp.end();
+      }
+    }
+  }
+
+  async getFiles(
+    files: { local: string; remote: string }[],
+    {
+      concurrency = DEFAULT_CONCURRENCY,
+      sftp: givenSftp = null,
+      transferOptions = {},
+      tick = DEFAULT_TICK,
+    }: SSHPutFilesOptions = {},
+  ): Promise<void> {
+    invariant(Array.isArray(files), 'files must be an array');
+
+    for (let i = 0, { length } = files; i < length; i += 1) {
+      const file = files[i];
+      invariant(file, 'files items must be valid objects');
+      invariant(
+        file.local && typeof file.local === 'string',
+        `files[${i}].local must be a string`,
+      );
+      invariant(
+        file.remote && typeof file.remote === 'string',
+        `files[${i}].remote must be a string`,
+      );
+    }
+
+    const transferred: typeof files = [];
+    const sftp = givenSftp || (await this.requestSFTP());
+    const queue = new PromiseQueue({ concurrency });
+
+    try {
+      await new Promise((resolve, reject) => {
+        files.forEach((file) => {
+          queue
+            .add(async () => {
+              let beforeTotalTransferred = 0;
+              await this.getFile(file.local, file.remote, sftp, {
+                ...transferOptions,
+                step: (
+                  total_transferred: number,
+                  chunk: number,
+                  total: number,
+                ) => {
+                  if (transferOptions.step) {
+                    if (total_transferred === total) {
+                      transferOptions.step(
+                        total_transferred,
+                        chunk,
+                        total,
+                        // @ts-ignore
+                        file.local,
+                      );
+                      return;
+                    }
+                    if (
+                      (total_transferred - beforeTotalTransferred) / total >
+                      0.03
+                    ) {
+                      transferOptions.step(
+                        total_transferred,
+                        chunk,
+                        total,
+                        // @ts-ignore
+                        file.local,
+                      );
+                      beforeTotalTransferred = total_transferred;
+                    }
+                  }
+                },
+              });
+              tick(file.local, file.remote, null);
+              transferred.push(file);
+            })
+            .catch((error) => {
+              reject(error);
+              tick(file.local, file.remote, error);
+            });
+        });
+
+        queue.waitTillIdle().then(resolve);
+      });
+    } catch (error) {
+      if (error != null) {
+        error.transferred = transferred;
+      }
+      throw error;
     } finally {
       if (!givenSftp) {
         sftp.end();
@@ -999,13 +1090,42 @@ export class NodeSSH {
             .add(async () => {
               const localFile = fsPath.join(localDirectory, file);
               const remoteFile = fsPath.join(remoteDirectory, file);
+              let beforeTotalTransferred = 0;
               try {
-                await this.getFile(
-                  localFile,
-                  remoteFile,
-                  sftp,
-                  transferOptions,
-                );
+                await this.getFile(localFile, remoteFile, sftp, {
+                  ...transferOptions,
+                  step: (
+                    total_transferred: number,
+                    chunk: number,
+                    total: number,
+                  ) => {
+                    if (transferOptions.step) {
+                      if (total_transferred === total) {
+                        transferOptions.step(
+                          total_transferred,
+                          chunk,
+                          total,
+                          // @ts-ignore
+                          remoteFile,
+                        );
+                        return;
+                      }
+                      if (
+                        (total_transferred - beforeTotalTransferred) / total >
+                        0.03
+                      ) {
+                        transferOptions.step(
+                          total_transferred,
+                          chunk,
+                          total,
+                          // @ts-ignore
+                          remoteFile,
+                        );
+                        beforeTotalTransferred = total_transferred;
+                      }
+                    }
+                  },
+                });
                 tick(localFile, remoteFile, null);
               } catch (_) {
                 failed = true;

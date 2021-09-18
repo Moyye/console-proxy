@@ -456,6 +456,7 @@ export class AppService
     };
   }
 
+  // 传文件夹
   @SubscribeMessage('file:writeFileByPath')
   @WsErrorCatch()
   async writeFileBypath(
@@ -484,6 +485,7 @@ export class AppService
         },
       },
     });
+
     return {
       data: true,
     };
@@ -534,6 +536,7 @@ export class AppService
     };
   }
 
+  // 压缩下载
   @SubscribeMessage('file:getFiles')
   @WsErrorCatch()
   async getFiles(@MessageBody() { id, data: { remotePaths } }) {
@@ -557,6 +560,73 @@ export class AppService
 
     return {
       data: buffer,
+    };
+  }
+
+  // 下载文件夹
+  @SubscribeMessage('file:getFileByPath')
+  @WsErrorCatch()
+  async getFileByPath(
+    socket: ConsoleSocket,
+    { id, data: { localDirectory, remoteDirectory } },
+  ) {
+    const connection = await this.getConnection(id);
+    if (!connection) {
+      return { errorMessage: '无法连接' };
+    }
+
+    await connection.getDirectory(localDirectory, remoteDirectory, {
+      concurrency: 5,
+      transferOptions: {
+        // @ts-ignore
+        step: (
+          total_transferred: number,
+          chunk: number,
+          total: number,
+          remoteFile: string,
+        ) => {
+          socket.emit(`file:download:${id}`, {
+            filepath: remoteFile,
+            process: Number.parseFloat((total_transferred / total).toFixed(3)),
+          });
+        },
+      },
+    });
+
+    return {
+      data: true,
+    };
+  }
+
+  // 单次下载多个文件
+  @SubscribeMessage('file:getFilesByPath')
+  @WsErrorCatch()
+  async getFilesByPath(socket: ConsoleSocket, { id, data: { files } }) {
+    const connection = await this.getConnection(id);
+    if (!connection) {
+      return { errorMessage: '无法连接' };
+    }
+
+    await connection.getFiles(files, {
+      concurrency: 5,
+      transferOptions: {
+        // @ts-ignore
+        step: (
+          total_transferred: number,
+          chunk: number,
+          total: number,
+          remoteFile: string,
+        ) => {
+          socket.emit(`file:download:${id}`, {
+            filepath: remoteFile,
+            process: Number.parseFloat((total_transferred / total).toFixed(3)),
+          });
+        },
+      },
+    });
+
+    return {
+      data: true,
     };
   }
 
