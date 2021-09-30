@@ -22,695 +22,23 @@ import { ConsoleSocket, SFTP } from './interface';
 import { decrypt, md5, sleep, WsErrorCatch } from './utils/kit';
 import { ForwardInParams } from './dto';
 import * as fs from 'fs';
-import fetch from 'node-fetch';
 import IORedis from 'ioredis';
 import { parse as redisInfoParser } from 'redis-info';
 
 const lookup = promisify(dns.lookup);
+const readFile = promisify(fs.readFile);
 
 enum KEYS {
-  connectionId = '_connectionId',
-  socket = '_socket',
-  sftp = '_sftp',
   statusShell = '_statusShell',
-  connection = '_connection',
-  shellMap = '_shellMap',
-  connectionMap = '_connectionMap',
-  clearConnectionTimeoutHolder = '_clearConnectionTimeoutHolder',
-  redisId = '_redisId',
-  redisMap = '_redisMap',
+  connectionConfig = 'connectionConfig',
+  serverStatusLock = 'serverStatusLock',
 }
 
 @Injectable()
-@WebSocketGateway()
-export class AppService
-  implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect
-{
+export class Forward {
   private logger: Logger = new Logger('WebsocketGateway');
 
-  private connectionMap: Map<string, NodeSSH> = new Map();
-
   private forwardConnectionMap: Map<string, NodeSSH> = new Map();
-
-  private shellMap: Map<string, ClientChannel> = new Map();
-
-  private ftpMap: Map<string, SFTP> = new Map();
-
-  private redisMap: Map<string, IORedis.Redis> = new Map();
-
-  static sftpPromisify(sftpClient) {
-    ['readdir', 'readFile', 'writeFile', 'rename', 'unlink', 'rmdir'].forEach(
-      (method) => {
-        sftpClient[method] = promisify(sftpClient[method]);
-      },
-    );
-
-    return sftpClient;
-  }
-
-  private static execs(connection: NodeSSH, command: string) {
-    return connection.execCommand(command, {
-      execOptions: { env: { HISTIGNORE: '*' } },
-    });
-  }
-
-  private static exec(
-    connection: NodeSSH,
-    command: string,
-    parameters: string[],
-  ) {
-    return connection.exec(command, parameters);
-  }
-
-  async getSftp(
-    connectionId: string | null,
-    connection?: NodeSSH,
-    retryDelay?: number,
-  ): Promise<undefined | SFTP> {
-    if (connectionId) {
-      const sftpExist = this.ftpMap.get(connectionId);
-      if (sftpExist) {
-        return sftpExist;
-      }
-
-      if (retryDelay) {
-        await sleep(retryDelay);
-        return this.getSftp(connectionId, connection);
-      }
-    }
-
-    if (connection) {
-      const sftp: unknown = await connection.requestSFTP();
-      const promiseSftp = AppService.sftpPromisify(sftp);
-      if (connectionId) {
-        this.ftpMap.set(connectionId, promiseSftp);
-      }
-      return promiseSftp as SFTP;
-    }
-
-    return undefined;
-  }
-
-  async getShell(id: string, connection?: NodeSSH) {
-    const sshExist = this.shellMap.get(id);
-    if (sshExist) {
-      return sshExist;
-    }
-    if (connection) {
-      const shell = await connection.requestShell({
-        term: 'xterm-256color',
-      });
-      this.shellMap.set(id, shell);
-      return shell;
-    }
-
-    return undefined;
-  }
-
-  handleDisconnect(socket: ConsoleSocket) {
-    socket.removeAllListeners();
-
-    // 断开 SSH
-    const connectionMap: Record<string, NodeSSH> = _.get(
-      socket,
-      KEYS.connectionMap,
-    );
-
-    if (connectionMap) {
-      for (const connection of Object.values(connectionMap)) {
-        this.clearConnection(connection);
-      }
-    }
-
-    // 断开 REDIS
-    const redisMap: Record<string, IORedis.Redis> = _.get(
-      socket,
-      KEYS.redisMap,
-    );
-
-    if (redisMap) {
-      for (const redis of Object.values(redisMap).filter(Boolean)) {
-        redis.quit();
-        this.redisMap.delete(_.get(redis, KEYS.redisId));
-      }
-    }
-
-    this.logger.log(`Client disconnected: ${socket.id}`);
-  }
-
-  afterInit(): void {
-    return this.logger.log(
-      `Websocket server successfully started port:${process.env.PORT}`,
-    );
-  }
-
-  async handleConnection(socket: ConsoleSocket): Promise<void> {
-    socket.emit('login');
-    this.logger.log(`Client connected, socketId: ${socket.id}`);
-  }
-
-  @SubscribeMessage('terminal:preConnect')
-  @WsErrorCatch()
-  async preSSHConnect(
-    socket: ConsoleSocket,
-    { host, username, password = '', privateKey = '', port = 22 },
-  ) {
-    const secretKey = md5(`${host}${username}${port}`).toString();
-
-    if (password) {
-      password = decrypt(password, secretKey);
-    }
-    if (privateKey) {
-      privateKey = decrypt(privateKey, secretKey);
-    }
-
-    const connectionId = md5(
-      `${host}${username}${port}${password}${privateKey}`,
-    ).toString();
-
-    try {
-      await this.getConnection(connectionId, {
-        host: host === 'linuxServer' ? process.env.TMP_SERVER : host,
-        username,
-        port,
-        tryKeyboard: true,
-        keepaliveInterval: 10000,
-        ...(password && { password }),
-        ...(privateKey && { privateKey }),
-      });
-
-      this.logger.log(`[preConnect] connected, server: ${username}@${host}`);
-    } catch (error) {
-      this.logger.error('[preConnect] error', error.stack);
-      return {
-        success: false,
-        errorMessage: error.message,
-      };
-    }
-
-    return {
-      success: true,
-      errorMessage: '',
-    };
-  }
-
-  @SubscribeMessage('terminal:new')
-  @WsErrorCatch()
-  async newTerminal(
-    socket: ConsoleSocket,
-    { id, host, username, password = '', privateKey = '', port = 22 },
-  ) {
-    try {
-      const secretKey = md5(`${host}${username}${port}`).toString();
-
-      if (password) {
-        password = decrypt(password, secretKey);
-      }
-      if (privateKey) {
-        privateKey = decrypt(privateKey, secretKey);
-      }
-
-      const connectionId = md5(
-        `${host}${username}${port}${password}${privateKey}`,
-      ).toString();
-
-      const connection = (await this.getConnection(connectionId, {
-        host: host === 'linuxServer' ? process.env.TMP_SERVER : host,
-        username,
-        port,
-        tryKeyboard: true,
-        keepaliveInterval: 10000,
-        ...(password && { password }),
-        ...(privateKey && { privateKey }),
-      }))!;
-
-      // 初始化 sftp
-      const sftp = (await this.getSftp(connectionId, connection))!;
-      // 初始化 terminal
-      const shell = (await this.getShell(id, connection))!;
-
-      // connection <-> sftp
-      _.set(connection, KEYS.sftp, sftp);
-      _.set(sftp, KEYS.connection, connection);
-      // connection <-> shell[]
-      _.set(connection, `${KEYS.shellMap}.${id}`, shell);
-      _.set(shell, KEYS.connection, connection);
-      // socket <-> connection[]
-      _.set(socket, `${KEYS.connectionMap}.${connectionId}`, connection);
-      _.set(connection, KEYS.socket, socket);
-      _.set(connection, KEYS.connectionId, connectionId);
-
-      // 建立 terminal 监听
-      shell.on('data', (data) => {
-        socket.emit('terminal:data', { data: data.toString(), id });
-      });
-      shell.on('close', () => {
-        if (connection.isConnected()) {
-          this.closeTerminal({ id });
-        }
-        socket.emit('terminal:data', {
-          data: '连接意外退出,重新连接中\r\n',
-          id,
-        });
-        setTimeout(() => {
-          socket.emit('terminal:reconnect', { id });
-        }, 2 * 1000);
-      });
-      shell.on('error', (error) => {
-        this.logger.error(`[shell]: ${host}${username} error`, error.stack());
-      });
-
-      this.logger.log(`[newTerminal] connected, server: ${username}@${host}`);
-    } catch (error) {
-      this.logger.error('[newTerminal] error', error.stack);
-      return {
-        success: false,
-        errorMessage: error.message,
-      };
-    }
-
-    return {
-      success: true,
-      errorMessage: '',
-    };
-  }
-
-  @SubscribeMessage('terminal:close')
-  @WsErrorCatch()
-  async closeTerminal(@MessageBody() { id }) {
-    const shell = await this.getShell(id);
-    if (shell) {
-      const connection: NodeSSH = _.get(shell, KEYS.connection);
-      const sshMap: Record<string, NodeSSH> = _.get(connection, KEYS.shellMap);
-
-      shell.close();
-      delete sshMap[id];
-      this.shellMap.delete(id);
-      this.logger.log(`[closeTerminal] socketId: ${id}`);
-
-      if (_.isEmpty(sshMap)) {
-        this.clearConnection(connection);
-      }
-    }
-  }
-
-  @SubscribeMessage('file:list')
-  @WsErrorCatch()
-  async list(@MessageBody() { id, data }) {
-    let targetPath = data?.path;
-    if (!targetPath || targetPath === '~') {
-      const connection = await this.getConnection(id, undefined, 1000);
-      if (!connection) {
-        return { errorMessage: '无法连接' };
-      }
-      const { stdout } = await AppService.execs(connection, 'pwd');
-      targetPath = stdout || '/';
-    }
-
-    const sftp = await this.getSftp(id, undefined, 1000);
-    if (!sftp) {
-      return { errorMessage: '无法连接' };
-    }
-
-    const originalList = await sftp.readdir(targetPath);
-    const list = originalList
-      .map((file: any) => {
-        const createdAt = new Date(file.attrs.atime * 1000);
-        const updatedAt = new Date(file.attrs.mtime * 1000);
-        const isFile = file.attrs.isFile();
-        return {
-          createdAt,
-          updatedAt,
-          isFile,
-          isDir: file.attrs.isDirectory(),
-          filename: file.filename,
-          size: file.attrs.size || 0,
-          id: (targetPath + '/' + file.filename).replace('//', '/'),
-        };
-      })
-      .filter((file) => file.isDir || file.isFile);
-
-    return {
-      data: {
-        pwd: targetPath,
-        fileEntries: list,
-      },
-    };
-  }
-
-  @SubscribeMessage('file:find')
-  @WsErrorCatch()
-  async find(@MessageBody() { id, data: { path, search } }) {
-    let targetPath = path;
-    const connection = await this.getConnection(id);
-    if (!connection) {
-      return { errorMessage: '无法连接' };
-    }
-
-    if (!path) {
-      const { stdout } = await AppService.execs(connection, 'pwd');
-      targetPath = stdout;
-    }
-
-    const { stdout } = await AppService.execs(
-      connection,
-      `find ${targetPath} -type f -name "*${search}*" | head -20`,
-    );
-    return {
-      data: stdout.split('\n'),
-    };
-  }
-
-  @SubscribeMessage('terminal:resize')
-  @WsErrorCatch()
-  async resize(
-    @MessageBody() { id, data: { cols, rows, height = 480, width = 640 } },
-  ) {
-    (await this.getShell(id))?.setWindow(rows, cols, height, width);
-  }
-
-  @SubscribeMessage('terminal:input')
-  @WsErrorCatch()
-  async input(@MessageBody() { id, data }) {
-    (await this.getShell(id))?.write(data);
-  }
-
-  @SubscribeMessage('file:touch')
-  @WsErrorCatch()
-  async touch(@MessageBody() { id, data: { remotePath } }) {
-    const sftp = await this.getSftp(id);
-    if (!sftp) {
-      return { errorMessage: '无法连接' };
-    }
-    await sftp.writeFile(remotePath, '');
-
-    return {
-      data: true,
-    };
-  }
-
-  @SubscribeMessage('file:serverStatus')
-  @WsErrorCatch()
-  async serverStatus(@MessageBody() { id }) {
-    const connection = await this.getConnection(id, undefined, 1000);
-    if (!connection) {
-      return { errorMessage: '无法连接' };
-    }
-    if (!connection.isConnected()) {
-      this.clearConnection(connection);
-    }
-
-    try {
-      const sftp = await this.getSftp(id);
-      if (!sftp) {
-        return { errorMessage: '无法连接' };
-      }
-      const file = await sftp.readFile('.terminal.icu/agent/status.txt', {});
-
-      return { data: JSON.parse(file.toString()) };
-    } catch (e) {
-      return { data: {} };
-    }
-  }
-
-  @SubscribeMessage('file:writeFile')
-  @WsErrorCatch()
-  async writeFile(socket: ConsoleSocket, { id, data: { remotePath, buffer } }) {
-    const sftp = await this.getSftp(id);
-    if (!sftp) {
-      return { errorMessage: '无法连接' };
-    }
-
-    socket.emit(`file:uploaded:${id}`, {
-      filepath: Path.basename(remotePath),
-      process: 0.01,
-    });
-    await sftp.writeFile(remotePath, buffer);
-    socket.emit(`file:uploaded:${id}`, {
-      filepath: Path.basename(remotePath),
-      process: 1,
-    });
-
-    return {
-      data: true,
-    };
-  }
-
-  // 传文件夹
-  @SubscribeMessage('file:writeFileByPath')
-  @WsErrorCatch()
-  async writeFileBypath(
-    socket: ConsoleSocket,
-    { id, data: { localDirectory, remoteDirectory } },
-  ) {
-    const connection = await this.getConnection(id);
-    if (!connection) {
-      return { errorMessage: '无法连接' };
-    }
-
-    await connection.putDirectory(localDirectory, remoteDirectory, {
-      concurrency: 5,
-      transferOptions: {
-        // @ts-ignore
-        step: (
-          total_transferred: number,
-          chunk: number,
-          total: number,
-          localFile: string,
-        ) => {
-          socket.emit(`file:uploaded:${id}`, {
-            filepath: localFile,
-            process: Number.parseFloat((total_transferred / total).toFixed(3)),
-          });
-        },
-      },
-    });
-
-    return {
-      data: true,
-    };
-  }
-
-  @SubscribeMessage('file:writeFiles')
-  @WsErrorCatch()
-  async writeFiles(socket: ConsoleSocket, { id, data: { files } }) {
-    const connection = await this.getConnection(id);
-    if (!connection) {
-      return { errorMessage: '无法连接' };
-    }
-    await connection.putFiles(files, {
-      concurrency: 5,
-      transferOptions: {
-        // @ts-ignore
-        step: (
-          total_transferred: number,
-          chunk: number,
-          total: number,
-          localFile: string,
-        ) => {
-          socket.emit(`file:uploaded:${id}`, {
-            filepath: localFile,
-            process: Number.parseFloat((total_transferred / total).toFixed(3)),
-          });
-        },
-      },
-    });
-
-    return {
-      data: true,
-    };
-  }
-
-  @SubscribeMessage('file:getFile')
-  @WsErrorCatch()
-  async getFile(@MessageBody() { id, data: { remotePath } }) {
-    const sftp = await this.getSftp(id);
-    if (!sftp) {
-      return { errorMessage: '无法连接' };
-    }
-
-    const buffer = await sftp.readFile(remotePath, {});
-
-    return {
-      data: buffer,
-    };
-  }
-
-  // 压缩下载
-  @SubscribeMessage('file:getFiles')
-  @WsErrorCatch()
-  async getFiles(@MessageBody() { id, data: { remotePaths } }) {
-    const connection = await this.getConnection(id);
-    const sftp = await this.getSftp(id);
-
-    if (!sftp || !connection) {
-      return { errorMessage: '无法连接' };
-    }
-
-    const tarFilename = `/tmp/${moment().format('YYYYMMDDHHmmss')}.tar.gz`;
-    const tarFileStringArr: string[] = ['-czf', tarFilename];
-    remotePaths.forEach((item) => {
-      tarFileStringArr.push('-C');
-      tarFileStringArr.push(item.path);
-      tarFileStringArr.push(item.filename);
-    });
-    await AppService.exec(connection, 'tar', tarFileStringArr);
-    const buffer = await sftp.readFile(tarFilename, {});
-    sftp.unlink(tarFilename).then();
-
-    return {
-      data: buffer,
-    };
-  }
-
-  // 下载文件夹
-  @SubscribeMessage('file:getFileByPath')
-  @WsErrorCatch()
-  async getFileByPath(
-    socket: ConsoleSocket,
-    { id, data: { localDirectory, remoteDirectory } },
-  ) {
-    const connection = await this.getConnection(id);
-    if (!connection) {
-      return { errorMessage: '无法连接' };
-    }
-
-    await connection.getDirectory(localDirectory, remoteDirectory, {
-      concurrency: 5,
-      transferOptions: {
-        // @ts-ignore
-        step: (
-          total_transferred: number,
-          chunk: number,
-          total: number,
-          remoteFile: string,
-        ) => {
-          socket.emit(`file:download:${id}`, {
-            filepath: remoteFile,
-            process: Number.parseFloat((total_transferred / total).toFixed(3)),
-          });
-        },
-      },
-    });
-
-    return {
-      data: true,
-    };
-  }
-
-  // 单次下载多个文件
-  @SubscribeMessage('file:getFilesByPath')
-  @WsErrorCatch()
-  async getFilesByPath(socket: ConsoleSocket, { id, data: { files } }) {
-    const connection = await this.getConnection(id);
-    if (!connection) {
-      return { errorMessage: '无法连接' };
-    }
-
-    await connection.getFiles(files, {
-      concurrency: 5,
-      transferOptions: {
-        // @ts-ignore
-        step: (
-          total_transferred: number,
-          chunk: number,
-          total: number,
-          remoteFile: string,
-        ) => {
-          socket.emit(`file:download:${id}`, {
-            filepath: remoteFile,
-            process: Number.parseFloat((total_transferred / total).toFixed(3)),
-          });
-        },
-      },
-    });
-
-    return {
-      data: true,
-    };
-  }
-
-  @SubscribeMessage('file:rename')
-  @WsErrorCatch()
-  async rename(@MessageBody() { id, data: { srcPath, destPath } }) {
-    const sftp = await this.getSftp(id);
-    if (!sftp) {
-      return { errorMessage: '无法连接' };
-    }
-
-    await sftp.rename(srcPath, destPath);
-
-    return {
-      data: true,
-    };
-  }
-
-  @SubscribeMessage('file:unlink')
-  @WsErrorCatch()
-  async unlink(@MessageBody() { id, data: { remotePath } }) {
-    const sftp = await this.getSftp(id);
-    if (!sftp) {
-      return { errorMessage: '无法连接' };
-    }
-
-    await sftp.unlink(remotePath);
-
-    return {
-      data: true,
-    };
-  }
-
-  @SubscribeMessage('file:rmdir')
-  @WsErrorCatch()
-  async rmdir(@MessageBody() { id, data: { remotePath } }) {
-    const sftp = await this.getSftp(id);
-    if (!sftp) {
-      return { errorMessage: '无法连接' };
-    }
-
-    await sftp.rmdir(remotePath);
-
-    return {
-      data: true,
-    };
-  }
-
-  @SubscribeMessage('file:rmrf')
-  @WsErrorCatch()
-  async rmrf(@MessageBody() { id, data: { remotePath } }) {
-    const connection = await this.getConnection(id);
-    if (!connection) {
-      return { errorMessage: '无法连接' };
-    }
-
-    const { stderr } = await AppService.execs(
-      connection,
-      `rm -rf ${remotePath}`,
-    );
-    if (stderr) {
-      const sftp = await this.getSftp(id);
-      await sftp.rmdir(remotePath);
-    }
-
-    return {
-      data: true,
-    };
-  }
-
-  @SubscribeMessage('file:mkdir')
-  @WsErrorCatch()
-  async mkdir(@MessageBody() { id, data: { remotePath } }) {
-    const sftp = await this.getSftp(id);
-    if (!sftp) {
-      return { errorMessage: '无法连接' };
-    }
-
-    await sftp.mkdir(remotePath, {});
-
-    return {
-      data: true,
-    };
-  }
 
   ping(): string {
     return 'pong';
@@ -851,320 +179,290 @@ export class AppService
 
     return status;
   }
+}
 
-  //  分割线
+@Injectable()
+@WebSocketGateway()
+export class Provider
+  implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect
+{
+  private logger: Logger = new Logger('Provider');
+
+  afterInit(): void {
+    return this.logger.log(
+      `Websocket server successfully started port:${process.env.PORT}`,
+    );
+  }
+
+  async handleConnection(socket: ConsoleSocket): Promise<void> {
+    socket.shellService = new Shell(socket);
+    socket.sftpService = new Sftp(socket);
+    socket.redisService = new Redis(socket);
+    socket.serverStatusService = new ServerStatus(socket);
+    this.logger.log(`Client connected, socketId: ${socket.id}`);
+  }
+
+  handleDisconnect(socket: ConsoleSocket) {
+    socket.shellService.handleDisconnect();
+    socket.sftpService.handleDisconnect();
+    socket.redisService.handleDisconnect();
+    socket.removeAllListeners();
+  }
+
+  @SubscribeMessage('terminal:preConnect')
+  async preShellConnect(socket: ConsoleSocket, messageBody) {
+    return socket.shellService.preConnect(messageBody);
+  }
+
+  @SubscribeMessage('terminal:new')
+  async newShell(socket: ConsoleSocket, messageBody) {
+    return socket.shellService.newShell(messageBody);
+  }
+
+  @SubscribeMessage('terminal:close')
+  async closeShell(socket: ConsoleSocket, messageBody) {
+    return socket.shellService.closeShell(messageBody);
+  }
+
+  @SubscribeMessage('terminal:input')
+  async shellInput(socket: ConsoleSocket, messageBody) {
+    return socket.shellService.input(messageBody);
+  }
+
+  @SubscribeMessage('terminal:resize')
+  async shellResize(socket: ConsoleSocket, messageBody) {
+    return socket.shellService.resize(messageBody);
+  }
+
+  @SubscribeMessage('terminal:disconnect')
+  async shellDisconnect(socket: ConsoleSocket, { id }) {
+    return socket.shellService.handleDisconnect(id);
+  }
+
+  @SubscribeMessage('serverStatus:startFresh')
+  async serverStatusStartFresh(socket: ConsoleSocket, MessageBody) {
+    return socket.serverStatusService.startFresh(MessageBody);
+  }
+
+  @SubscribeMessage('serverStatus:serverStatus')
+  async serverStatus(@MessageBody() { id }) {
+    //
+  }
+
+  @SubscribeMessage('file:new')
+  async newSftp(socket: ConsoleSocket, messageBody) {
+    return socket.sftpService.newSftp(messageBody);
+  }
+
+  @SubscribeMessage('file:close')
+  async closeSftp(socket: ConsoleSocket, messageBody) {
+    return socket.sftpService.closeSftp(messageBody);
+  }
+
+  @SubscribeMessage('file:list')
+  async sftpReaddir(socket: ConsoleSocket, messageBody) {
+    return socket.sftpService.sftpReaddir(messageBody);
+  }
+
+  @SubscribeMessage('file:touch')
+  async touch(socket: ConsoleSocket, messageBody) {
+    return socket.sftpService.touch(messageBody);
+  }
+
+  @SubscribeMessage('file:writeFile')
+  async writeFile(socket: ConsoleSocket, messageBody) {
+    return socket.sftpService.writeFile(messageBody);
+  }
+
+  @SubscribeMessage('file:writeFileByPath')
+  async writeFileByPath(socket: ConsoleSocket, messageBody) {
+    return socket.sftpService.writeFileByPath(messageBody);
+  }
+
+  @SubscribeMessage('file:writeFiles')
+  async writeFiles(socket: ConsoleSocket, messageBody) {
+    return socket.sftpService.writeFiles(messageBody);
+  }
+
+  @SubscribeMessage('file:getFile')
+  async getFile(socket: ConsoleSocket, messageBody) {
+    return socket.sftpService.getFile(messageBody);
+  }
+
+  @SubscribeMessage('file:getFiles')
+  async getFiles(socket: ConsoleSocket, messageBody) {
+    return socket.sftpService.getFiles(messageBody);
+  }
+
+  @SubscribeMessage('file:getFiles')
+  async getFileByPath(socket: ConsoleSocket, messageBody) {
+    return socket.sftpService.getFileByPath(messageBody);
+  }
+
+  @SubscribeMessage('file:getFilesByPath')
+  async getFilesByPath(socket: ConsoleSocket, messageBody) {
+    return socket.sftpService.getFilesByPath(messageBody);
+  }
+
+  @SubscribeMessage('file:rename')
+  async rename(socket: ConsoleSocket, messageBody) {
+    return socket.sftpService.rename(messageBody);
+  }
+
+  @SubscribeMessage('file:unlink')
+  async unlink(socket: ConsoleSocket, messageBody) {
+    return socket.sftpService.unlink(messageBody);
+  }
+
+  @SubscribeMessage('file:rmdir')
+  async rmdir(socket: ConsoleSocket, messageBody) {
+    return socket.sftpService.rmdir(messageBody);
+  }
+
+  @SubscribeMessage('file:rmrf')
+  async rmrf(socket: ConsoleSocket, messageBody) {
+    return socket.sftpService.rmrf(messageBody);
+  }
+
+  @SubscribeMessage('file:mkdir')
+  async mkdir(socket: ConsoleSocket, messageBody) {
+    return socket.sftpService.mkdir(messageBody);
+  }
+
   @SubscribeMessage('redis:connect')
-  @WsErrorCatch()
-  async redisConnect(
-    socket: ConsoleSocket,
-    { id, initKeys = true, host, port = 6379, password, ...config },
-  ) {
-    this.logger.log(`[newRedis] start ${id} initKeys: ${initKeys} ${host}`);
-    let redis: IORedis.Redis;
-
-    redis = this.redisMap.get(id);
-    if (redis) {
-      this.logger.log('[newRedis] connecting');
-      // 正在连接
-    } else {
-      this.logger.log('[newRedis] new redis');
-
-      // 新建连接
-      const secretKey = md5(`${host}${port}`).toString();
-      if (password) {
-        password = decrypt(password, secretKey);
-      }
-
-      try {
-        await new Promise((resolve, reject) => {
-          redis = new IORedis({
-            ...config,
-            host,
-            port,
-            password,
-          });
-          redis.on('error', async (error) => {
-            this.logger.log(`[newRedis] error event ${error.message}`);
-            await redis.quit();
-            reject(error);
-          });
-          redis.on('connect', () => {
-            this.logger.log(`[newRedis] connect success event`);
-            resolve(redis);
-          });
-          redis.on('close', () => {
-            this.logger.log(`[newRedis] close event`);
-          });
-        });
-      } catch (error) {
-        this.logger.log(`[newRedis] error ${error.message}`);
-        return {
-          success: false,
-          errorMessage: error.message,
-        };
-      }
-      this.redisMap.set(id, redis);
-      _.set(redis, KEYS.redisId, id);
-      _.set(socket, `${KEYS.redisMap}.${id}`, redis);
-    }
-
-    return {
-      success: true,
-      data: initKeys ? (await this.redisKeys({ match: '*', id })).data : [],
-    };
+  async redisConnect(socket: ConsoleSocket, messageBody) {
+    return socket.redisService.redisConnect(messageBody);
   }
 
   @SubscribeMessage('redis:disConnect')
-  @WsErrorCatch()
-  async redisDisConnect(socket: ConsoleSocket, { id }) {
-    this.logger.log(`redis:disConnect`);
-    const redis = this.redisMap.get(id);
-    this.redisMap.delete(id);
-    _.set(socket, `${KEYS.redisMap}.${id}`, undefined);
-    if (redis) {
-      redis.removeAllListeners();
-      await redis.quit();
-    }
-
-    return {
-      success: true,
-    };
+  async redisDisConnect(socket: ConsoleSocket, messageBody) {
+    return socket.redisService.redisDisConnect(messageBody);
   }
 
   @SubscribeMessage('redis:deleteKey')
-  @WsErrorCatch()
-  async deleteRedisKey(
-    @MessageBody() { id, refreshKeys = true, keys, match, count, method },
-  ) {
-    this.logger.log('redis:deleteKey start', keys.map((v) => v.key).join(','));
-    const redis = this.redisMap.get(id);
-    if (!redis) {
-      return { errorMessage: 'redis 已断开连接' };
-    }
-
-    method = method === 'unlink' ? 'unlink' : 'del';
-
-    await Promise.all([
-      // 普通的 key
-      Promise.all(
-        keys.filter((v) => v.isLeaf).map((v) => redis[method](v.key).catch()),
-      ),
-      // 前缀 key
-      Promise.all(
-        keys
-          .filter((v) => !v.isLeaf)
-          .map((v) => {
-            return new Promise((resolve) => {
-              if (!v.key) {
-                resolve(true);
-                return;
-              }
-
-              const stream = redis.scanStream({
-                match: `${v.key}:*`,
-                count: 50,
-              });
-
-              stream.on('data', async (resultKeys) => {
-                stream.pause();
-                await Promise.all(resultKeys.map((key) => redis[method](key)));
-                stream.resume();
-              });
-              stream.on('end', () => resolve(true));
-              stream.on('error', () => resolve(true));
-            });
-          }),
-      ),
-    ]);
-
-    return {
-      success: true,
-      data: refreshKeys
-        ? (await this.redisKeys({ match, id, count })).data
-        : [],
-    };
+  async deleteRedisKey(socket: ConsoleSocket, messageBody) {
+    return socket.redisService.deleteRedisKey(messageBody);
   }
 
   @SubscribeMessage('redis:keys')
-  @WsErrorCatch()
-  async redisKeys(@MessageBody() { id, match, needType = true, count = 500 }) {
-    const redis = this.redisMap.get(id);
-    if (!redis) {
-      return { errorMessage: 'redis 已断开连接', data: [] };
-    }
-
-    let cursor: undefined | string = undefined;
-    const result: string[] = [];
-    while (cursor !== '0' && result.length < count) {
-      const [currentCursor, currentResult] = await redis.scan(
-        cursor || '0',
-        'match',
-        match || '*',
-        'count',
-        50,
-      );
-
-      cursor = currentCursor;
-      result.push(...currentResult);
-    }
-
-    const keys = _.uniq(_.flatten(result));
-    if (!needType) {
-      return {
-        success: true,
-        data: keys.map((v) => ({ key: v })),
-      };
-    }
-
-    const pipeline = redis.pipeline();
-    keys.forEach((key) => pipeline.type(key));
-    const types = await pipeline.exec();
-    return {
-      success: true,
-      data: keys.map((key, index) => ({
-        key,
-        type: types[index][1],
-      })),
-    };
+  async redisKeys(socket: ConsoleSocket, messageBody) {
+    return socket.redisService.redisKeys(messageBody);
   }
 
   @SubscribeMessage('redis:hscan')
-  @WsErrorCatch()
-  async redisHScan(@MessageBody() { id, match, key, count = 500 }) {
-    const redis = this.redisMap.get(id);
-    if (!redis) {
-      return { errorMessage: 'redis 已断开连接' };
-    }
-
-    let cursor: undefined | string = undefined;
-    const result: string[] = [];
-    while (cursor !== '0' && result.length / 2 < count) {
-      const [currentCursor, currentResult] = await redis.hscan(
-        key,
-        cursor || '0',
-        'match',
-        match || '*',
-        'count',
-        50,
-      );
-
-      cursor = currentCursor;
-      result.push(...currentResult);
-    }
-
-    return {
-      success: true,
-      data: result,
-    };
+  async redisHScan(socket: ConsoleSocket, messageBody) {
+    return socket.redisService.redisHScan(messageBody);
   }
 
   @SubscribeMessage('redis:sscan')
+  async redisSScan(socket: ConsoleSocket, messageBody) {
+    return socket.redisService.redisSScan(messageBody);
+  }
+
+  @SubscribeMessage('redis:command')
+  async redisCommand(socket: ConsoleSocket, messageBody) {
+    return socket.redisService.redisCommand(messageBody);
+  }
+
+  @SubscribeMessage('redis:info')
+  async redisInfo(socket: ConsoleSocket, messageBody) {
+    return socket.redisService.redisInfo(messageBody);
+  }
+}
+
+class Base {
+  static logger: Logger = new Logger('Base');
+  connectionMap: Map<string, NodeSSH> = new Map();
+
+  static exec(connection: NodeSSH, command: string, parameters: string[]) {
+    return connection.exec(command, parameters);
+  }
+
+  static execs(connection: NodeSSH, command: string) {
+    return connection.execCommand(command, {
+      execOptions: {
+        env: {
+          HISTCONTROL: 'ignorespace',
+          HISTIGNORE: '*',
+          HISTSIZE: '0',
+          HISTFILESIZE: '0',
+        },
+      },
+    });
+  }
+
+  handleConnectionClose(nodeSSH: NodeSSH) {
+    throw new Error('handleConnectionClose 未实现');
+  }
+
+  handleConnectionError(nodeSSH: NodeSSH) {
+    throw new Error('handleConnectionError 未实现');
+  }
+
   @WsErrorCatch()
-  async redisSScan(@MessageBody() { id, match, key, count = 500 }) {
-    const redis = this.redisMap.get(id);
-    if (!redis) {
-      return { errorMessage: 'redis 已断开连接' };
-    }
+  async preConnect({
+    host,
+    username,
+    password = '',
+    privateKey = '',
+    port = 22,
+  }) {
+    try {
+      await this.getConnection({
+        host: host === 'linuxServer' ? process.env.TMP_SERVER : host,
+        username,
+        port,
+        tryKeyboard: true,
+        keepaliveInterval: 10000,
+        ...(password && { password }),
+        ...(privateKey && { privateKey }),
+      });
 
-    let cursor: undefined | string = undefined;
-    const result: string[] = [];
-    while (cursor !== '0' && result.length < count) {
-      const [currentCursor, currentResult] = await redis.sscan(
-        key,
-        cursor || '0',
-        'match',
-        match || '*',
-        'count',
-        50,
-      );
-
-      cursor = currentCursor;
-      result.push(...currentResult);
+      Base.logger.log(`[preConnect] connected, server: ${username}@${host}`);
+    } catch (error) {
+      Base.logger.error('[preConnect] error', error.stack);
+      return {
+        success: false,
+        errorMessage: error.message,
+      };
     }
 
     return {
       success: true,
-      data: result,
+      errorMessage: '',
     };
   }
 
-  @SubscribeMessage('redis:command')
-  @WsErrorCatch()
-  async redisCommand(@MessageBody() { id, command, params }) {
-    const redis = this.redisMap.get(id);
-    if (!redis) {
-      return { errorMessage: 'redis disconnect' };
-    }
-
-    try {
-      const data = await redis[command](...params);
-      return { success: true, data };
-    } catch (e) {
-      this.logger.error(e, 'redis:command');
-      return { errorMessage: e.message };
-    }
-  }
-
-  @SubscribeMessage('redis:info')
-  @WsErrorCatch()
-  async redisInfo(@MessageBody() { id }) {
-    const redis = this.redisMap.get(id);
-    if (!redis) {
-      return { errorMessage: 'redis disconnect' };
-    }
-    try {
-      const [[, keyspace], [, info], [, [, databases]]] = await redis
-        .pipeline()
-        .info('keyspace')
-        .info()
-        .config('get', 'databases')
-        .exec();
-      const parseInfo = redisInfoParser(info);
-      return {
-        success: true,
-        data: {
-          databases: Number.parseInt(databases),
-          keyspace: _.pick(redisInfoParser(keyspace), ['databases']),
-          cpu: _.pick(parseInfo, ['used_cpu_sys', 'used_cpu_user']),
-          memory: _.pick(parseInfo, [
-            'maxmemory',
-            'used_memory',
-            'total_system_memory',
-          ]),
-          server: _.pick(parseInfo, ['redis_version', 'uptime_in_days']),
-          clients: _.pick(parseInfo, ['connected_clients', 'blocked_clients']),
-          time: Date.now(),
-        },
-      };
-    } catch (e) {
-      this.logger.error(e, 'redis:command');
-      return { errorMessage: e.message };
-    }
-  }
-
-  //  分割线
-  private async getConnection(
-    connectId: string,
-    config?: ConnectionConfig,
+  async getConnection(
+    configOrId?: ConnectionConfig | string,
     retryDelay?: number,
   ): Promise<Undefinable<NodeSSH>> {
-    const connectExist = this.connectionMap.get(connectId);
-    if (connectExist) {
-      const timeoutHolder = _.get(
-        connectExist,
-        KEYS.clearConnectionTimeoutHolder,
-      );
-      if (timeoutHolder) {
-        this.logger.log(`[getConnection] reuse ${connectId}`);
-        _.set(connectExist, KEYS.clearConnectionTimeoutHolder, undefined);
-        clearTimeout(timeoutHolder);
-      }
-      return connectExist;
+    if (typeof configOrId === 'string') {
+      return this.connectionMap.get(configOrId);
     }
+
+    const config = configOrId;
+    const secretKey = md5(
+      `${config.host}${config.username}${config.port}`,
+    ).toString();
+
+    if (config.password) {
+      config.password = decrypt(config.password, secretKey);
+    }
+    if (config.privateKey) {
+      config.privateKey = decrypt(config.privateKey, secretKey);
+    }
+
+    const connectionId = md5(
+      `${config.host}${config.username}${config.port}${config.password}${config.privateKey}`,
+    ).toString();
+
+    const connectExist = this.connectionMap.get(connectionId);
+    if (connectExist) return connectExist;
 
     if (retryDelay) {
       await sleep(retryDelay);
-      return this.getConnection(connectId, config);
+      return this.getConnection(config);
     }
 
     if (config) {
@@ -1176,8 +474,13 @@ export class AppService
           // nothing
         }
       }
-      const connection = await new NodeSSH().connect({
+
+      // 将连接存一份在 connection 上，重连时可用
+      const connectionConfig = {
+        tryKeyboard: true,
+        keepaliveInterval: 10000,
         ...config,
+        privateKey: config.privateKey || undefined,
         algorithms: {
           kex: [
             'curve25519-sha256',
@@ -1239,220 +542,1026 @@ export class AppService
             'hmac-md5-96',
           ],
         },
-      });
+      };
+      const connection = await new NodeSSH().connect(connectionConfig);
+      _.set(connection, KEYS.connectionConfig, connectionConfig);
 
+      this.connectionMap.set(connectionId, connection);
+
+      // TODO 需要重做
       connection.connection?.on('error', (error) => {
-        this.logger.error('connection server error', error.stack);
-        this.clearConnection(connection, true);
+        Base.logger.error('connection server error', error.stack);
+        this.handleConnectionError(connection);
       });
       connection.connection?.on('close', () => {
-        this.logger.warn('connection server close');
-        this.clearConnection(connection, true);
+        Base.logger.warn('connection server close');
+        this.handleConnectionClose(connection);
       });
-      this.connectionMap.set(connectId, connection);
-      this.initAgent(connection).then();
 
       return connection;
     }
 
     return undefined;
   }
+}
 
-  private clearConnection(connection: NodeSSH, force = false) {
-    const shellMap: Record<string, ClientChannel> = _.get(
-      connection,
-      KEYS.shellMap,
+export class Shell extends Base {
+  static logger: Logger = new Logger('Shell');
+  private shellMap: Map<string, ClientChannel> = new Map();
+
+  constructor(private socket: ConsoleSocket) {
+    super();
+  }
+
+  @WsErrorCatch()
+  async getShell(id: string, connection?: NodeSSH) {
+    const sshExist = this.shellMap.get(id);
+    if (sshExist) return sshExist;
+
+    if (connection) {
+      const shell = await connection.requestShell({
+        term: 'xterm-256color',
+      });
+      this.shellMap.set(id, shell);
+      return shell;
+    }
+
+    return undefined;
+  }
+
+  @WsErrorCatch()
+  async closeShell({ id }) {
+    const shell = await this.getShell(id);
+    if (shell) {
+      shell.close();
+      this.shellMap.delete(id);
+      Shell.logger.log(`[closeShell] shellId: ${id}`);
+    }
+  }
+
+  @WsErrorCatch()
+  async newShell({
+    id,
+    host,
+    username,
+    password = '',
+    privateKey = '',
+    port = 22,
+    ...otherOptions
+  }) {
+    try {
+      const connection = (await this.getConnection({
+        host: host === 'linuxServer' ? process.env.TMP_SERVER : host,
+        username,
+        port,
+        password,
+        privateKey,
+        ...otherOptions,
+      }))!;
+
+      // 初始化 terminal
+      const shell = (await this.getShell(id, connection))!;
+
+      // 建立 terminal 监听
+      shell.on('data', (data) => {
+        this.socket.emit('terminal:data', { data: data.toString(), id });
+      });
+      shell.on('close', () => {
+        if (connection.isConnected()) {
+          this.closeShell({ id });
+        }
+        this.socket.emit('terminal:data', {
+          data: '连接意外退出,重新连接中\r\n',
+          id,
+        });
+        setTimeout(() => {
+          this.socket.emit('terminal:reconnect', { id });
+        }, 2 * 1000);
+      });
+
+      shell.on('error', (error) => {
+        Shell.logger.error(`[shell]: ${host}${username} error`, error.stack());
+      });
+
+      Shell.logger.log(`[newTerminal] connected, server: ${username}@${host}`);
+    } catch (error) {
+      Shell.logger.error('[newTerminal] error', error.stack);
+      return {
+        success: false,
+        errorMessage: error.message,
+      };
+    }
+
+    return {
+      success: true,
+      errorMessage: '',
+    };
+  }
+
+  @WsErrorCatch()
+  async input({ id, data }) {
+    (await this.getShell(id))?.write(data);
+  }
+
+  @WsErrorCatch()
+  async resize({ id, data: { cols, rows, height = 480, width = 640 } }) {
+    (await this.getShell(id))?.setWindow(rows, cols, height, width);
+  }
+
+  handleDisconnect(connectionId?: string) {
+    if (connectionId) {
+      const connection = this.connectionMap.get(connectionId);
+      if (connection) {
+        this.connectionMap.delete(connectionId);
+        connection.dispose();
+      }
+
+      return;
+    }
+
+    for (const [id, connection] of Object.entries(this.connectionMap)) {
+      this.connectionMap.delete(id);
+      connection.dispose();
+    }
+
+    for (const [id, shell] of Object.entries(this.shellMap)) {
+      shell.close();
+      this.shellMap.delete(id);
+    }
+  }
+}
+
+export class Sftp extends Base {
+  static logger: Logger = new Logger('Sftp');
+  private sftpMap: Map<string, SFTP> = new Map();
+
+  constructor(private socket: ConsoleSocket) {
+    super();
+  }
+
+  static sftpPromisify(sftpClient) {
+    ['readdir', 'readFile', 'writeFile', 'rename', 'unlink', 'rmdir'].forEach(
+      (method) => {
+        sftpClient[method] = promisify(sftpClient[method]);
+      },
     );
-    if (shellMap) {
-      _.set(connection, KEYS.shellMap, undefined);
-      for (const [id, shell] of Object.entries(shellMap)) {
-        this.shellMap.delete(id);
-        shell.close();
+
+    return sftpClient;
+  }
+
+  @WsErrorCatch()
+  async closeSftp({ id }) {
+    const sftp = await this.sftpMap.get(id);
+    if (sftp) {
+      sftp.end();
+      this.sftpMap.delete(id);
+      Shell.logger.log(`[closeSftp] sftpId: ${id}`);
+    }
+  }
+
+  @WsErrorCatch()
+  async newSftp({
+    id,
+    host,
+    username,
+    password = '',
+    privateKey = '',
+    port = 22,
+    ...otherOptions
+  }) {
+    try {
+      const connection = (await this.getConnection({
+        host: host === 'linuxServer' ? process.env.TMP_SERVER : host,
+        username,
+        port,
+        password,
+        privateKey,
+        ...otherOptions,
+      }))!;
+
+      const sftp: unknown = await connection.requestSFTP();
+      this.sftpMap.set(id, Sftp.sftpPromisify(sftp));
+    } catch (error) {
+      Sftp.logger.error('[newSftp] error', error.stack);
+      return {
+        success: false,
+        errorMessage: error.message,
+      };
+    }
+
+    return {
+      success: true,
+      errorMessage: '',
+    };
+  }
+
+  @WsErrorCatch()
+  async sftpReaddir({ id, data }) {
+    let targetPath = data?.path;
+    if (!targetPath || targetPath === '~') {
+      const connection = await this.getConnection(id);
+      if (!connection) return { errorMessage: '无法连接' };
+
+      const { stdout } = await Base.execs(connection, 'pwd');
+      targetPath = stdout || '/';
+    }
+
+    const sftp = this.sftpMap.get(id);
+    if (!sftp) return { errorMessage: '无法连接' };
+
+    const originalList = await sftp.readdir(targetPath);
+    const list = originalList
+      .map((file: any) => {
+        const createdAt = new Date(file.attrs.atime * 1000);
+        const updatedAt = new Date(file.attrs.mtime * 1000);
+        const isFile = file.attrs.isFile();
+        return {
+          createdAt,
+          updatedAt,
+          isFile,
+          isDir: file.attrs.isDirectory(),
+          filename: file.filename,
+          size: file.attrs.size || 0,
+          id: (targetPath + '/' + file.filename).replace('//', '/'),
+        };
+      })
+      .filter((file) => file.isDir || file.isFile);
+
+    return {
+      data: {
+        pwd: targetPath,
+        fileEntries: list,
+      },
+    };
+  }
+
+  @WsErrorCatch()
+  async touch({ id, data: { remotePath } }) {
+    const sftp = await this.sftpMap.get(id);
+    if (!sftp) return { errorMessage: '无法连接' };
+
+    await sftp.writeFile(remotePath, '');
+
+    return {
+      data: true,
+    };
+  }
+
+  @WsErrorCatch()
+  async writeFile({ id, data: { remotePath, buffer } }) {
+    const sftp = await this.sftpMap.get(id);
+    if (!sftp) return { errorMessage: '无法连接' };
+
+    this.socket.emit(`file:uploaded:${id}`, {
+      filepath: Path.basename(remotePath),
+      process: 0.01,
+    });
+
+    await sftp.writeFile(remotePath, buffer);
+
+    this.socket.emit(`file:uploaded:${id}`, {
+      filepath: Path.basename(remotePath),
+      process: 1,
+    });
+
+    return {
+      data: true,
+    };
+  }
+
+  @WsErrorCatch()
+  async writeFileByPath({ id, data: { localDirectory, remoteDirectory } }) {
+    const connection = await this.getConnection(id);
+    if (!connection) return { errorMessage: '无法连接' };
+
+    await connection.putDirectory(localDirectory, remoteDirectory, {
+      concurrency: 5,
+      transferOptions: {
+        // @ts-ignore
+        step: (
+          total_transferred: number,
+          chunk: number,
+          total: number,
+          localFile: string,
+        ) => {
+          this.socket.emit(`file:uploaded:${id}`, {
+            filepath: localFile,
+            process: Number.parseFloat((total_transferred / total).toFixed(3)),
+          });
+        },
+      },
+    });
+
+    return {
+      data: true,
+    };
+  }
+
+  @WsErrorCatch()
+  async writeFiles({ id, data: { files } }) {
+    const connection = await this.getConnection(id);
+    if (!connection) return { errorMessage: '无法连接' };
+
+    await connection.putFiles(files, {
+      concurrency: 5,
+      transferOptions: {
+        // @ts-ignore
+        step: (
+          total_transferred: number,
+          chunk: number,
+          total: number,
+          localFile: string,
+        ) => {
+          this.socket.emit(`file:uploaded:${id}`, {
+            filepath: localFile,
+            process: Number.parseFloat((total_transferred / total).toFixed(3)),
+          });
+        },
+      },
+    });
+
+    return {
+      data: true,
+    };
+  }
+
+  @WsErrorCatch()
+  async getFile({ id, data: { remotePath } }) {
+    const sftp = await this.sftpMap.get(id);
+    if (!sftp) return { errorMessage: '无法连接' };
+
+    const buffer = await sftp.readFile(remotePath, {});
+
+    return {
+      data: buffer,
+    };
+  }
+
+  @WsErrorCatch()
+  async getFiles(@MessageBody() { id, data: { remotePaths } }) {
+    const connection = await this.getConnection(id);
+    const sftp = await this.sftpMap.get(id);
+
+    if (!sftp || !connection) {
+      return { errorMessage: '无法连接' };
+    }
+
+    const tarFilename = `/tmp/${moment().format('YYYYMMDDHHmmss')}.tar.gz`;
+    const tarFileStringArr: string[] = ['-czf', tarFilename];
+    remotePaths.forEach((item) => {
+      tarFileStringArr.push('-C');
+      tarFileStringArr.push(item.path);
+      tarFileStringArr.push(item.filename);
+    });
+    await Base.exec(connection, 'tar', tarFileStringArr);
+    const buffer = await sftp.readFile(tarFilename, {});
+    sftp.unlink(tarFilename).then();
+
+    return {
+      data: buffer,
+    };
+  }
+
+  @WsErrorCatch()
+  async getFileByPath({ id, data: { localDirectory, remoteDirectory } }) {
+    const connection = await this.getConnection(id);
+    if (!connection) return { errorMessage: '无法连接' };
+
+    await connection.getDirectory(localDirectory, remoteDirectory, {
+      concurrency: 5,
+      transferOptions: {
+        // @ts-ignore
+        step: (
+          total_transferred: number,
+          chunk: number,
+          total: number,
+          remoteFile: string,
+        ) => {
+          this.socket.emit(`file:download:${id}`, {
+            filepath: remoteFile,
+            process: Number.parseFloat((total_transferred / total).toFixed(3)),
+          });
+        },
+      },
+    });
+
+    return {
+      data: true,
+    };
+  }
+
+  @WsErrorCatch()
+  async getFilesByPath({ id, data: { files } }) {
+    const connection = await this.getConnection(id);
+    if (!connection) return { errorMessage: '无法连接' };
+
+    await connection.getFiles(files, {
+      concurrency: 5,
+      transferOptions: {
+        // @ts-ignore
+        step: (
+          total_transferred: number,
+          chunk: number,
+          total: number,
+          remoteFile: string,
+        ) => {
+          this.socket.emit(`file:download:${id}`, {
+            filepath: remoteFile,
+            process: Number.parseFloat((total_transferred / total).toFixed(3)),
+          });
+        },
+      },
+    });
+
+    return {
+      data: true,
+    };
+  }
+
+  @WsErrorCatch()
+  async rename({ id, data: { srcPath, destPath } }) {
+    const sftp = await this.sftpMap.get(id);
+    if (!sftp) return { errorMessage: '无法连接' };
+
+    await sftp.rename(srcPath, destPath);
+
+    return {
+      data: true,
+    };
+  }
+
+  @WsErrorCatch()
+  async unlink(@MessageBody() { id, data: { remotePath } }) {
+    const sftp = await this.sftpMap.get(id);
+    if (!sftp) return { errorMessage: '无法连接' };
+
+    await sftp.unlink(remotePath);
+
+    return {
+      data: true,
+    };
+  }
+
+  @WsErrorCatch()
+  async rmdir(@MessageBody() { id, data: { remotePath } }) {
+    const sftp = await this.sftpMap.get(id);
+    if (!sftp) return { errorMessage: '无法连接' };
+
+    await sftp.rmdir(remotePath);
+
+    return {
+      data: true,
+    };
+  }
+
+  @WsErrorCatch()
+  async rmrf(@MessageBody() { id, data: { remotePath } }) {
+    const connection = await this.getConnection(id);
+    if (!connection) {
+      return { errorMessage: '无法连接' };
+    }
+
+    const { stderr } = await Base.execs(connection, `rm -rf ${remotePath}`);
+    if (stderr) {
+      const sftp = await this.sftpMap.get(id);
+      if (sftp) {
+        await sftp.rmdir(remotePath);
       }
     }
 
-    const clearConnectionTimeoutHolder = setTimeout(
-      () => {
-        const connectionId = _.get(connection, KEYS.connectionId);
-        const socket: ConsoleSocket = _.get(connection, KEYS.socket);
+    return {
+      data: true,
+    };
+  }
 
-        // 清除刷新状态的的 shell
-        const statusShell: ClientChannel = _.get(connection, KEYS.statusShell);
-        if (statusShell) {
-          statusShell.close();
-        }
+  @WsErrorCatch()
+  async mkdir(@MessageBody() { id, data: { remotePath } }) {
+    const sftp = await this.sftpMap.get(id);
+    if (!sftp) return { errorMessage: '无法连接' };
 
-        // 清除 sftp
-        this.ftpMap.delete(connectionId);
-        const sftp: SFTP = _.get(connection, KEYS.sftp);
-        if (sftp) {
-          _.set(connection, KEYS.sftp, undefined);
-          sftp.end();
-        }
+    await sftp.mkdir(remotePath, {});
 
-        delete socket[connectionId];
+    return {
+      data: true,
+    };
+  }
+
+  @WsErrorCatch()
+  async serverStatus({ id }) {
+    try {
+      const sftp = await this.sftpMap.get(id);
+      if (!sftp) return { errorMessage: '无法连接' };
+
+      const file = await sftp.readFile('.terminal.icu/agent/status.txt', {});
+
+      return { data: JSON.parse(file.toString()) };
+    } catch (e) {
+      return { data: {} };
+    }
+  }
+
+  handleDisconnect(connectionId?: string) {
+    if (connectionId) {
+      const connection = this.connectionMap.get(connectionId);
+      if (connection) {
         this.connectionMap.delete(connectionId);
         connection.dispose();
+      }
 
-        this.logger.log(`[clearConnection] connectionId: ${connectionId}`);
-      },
-      force ? 0 : 10 * 1000,
+      return;
+    }
+
+    for (const [id, connection] of Object.entries(this.connectionMap)) {
+      this.connectionMap.delete(id);
+      connection.dispose();
+    }
+
+    for (const [id, sftp] of Object.entries(this.sftpMap)) {
+      sftp.end();
+      this.sftpMap.delete(id);
+    }
+  }
+}
+
+export class Redis extends Base {
+  static logger: Logger = new Logger('Redis');
+  private redisMap: Map<string, IORedis.Redis> = new Map();
+
+  constructor(private socket: ConsoleSocket) {
+    super();
+  }
+
+  @WsErrorCatch()
+  async redisConnect({
+    id,
+    host,
+    password,
+    initKeys = true,
+    port = 6379,
+    ...config
+  }) {
+    Redis.logger.log(
+      `[redisConnect] start ${id} initKeys: ${initKeys} ${host}`,
+    );
+    let redis: IORedis.Redis;
+
+    redis = this.redisMap.get(id);
+    if (redis) {
+      Redis.logger.log('[redisConnect] connecting');
+      // 正在连接
+    } else {
+      Redis.logger.log('[redisConnect] new redis');
+
+      // 新建连接
+      const secretKey = md5(`${host}${port}`).toString();
+      if (password) {
+        password = decrypt(password, secretKey);
+      }
+
+      try {
+        await new Promise((resolve, reject) => {
+          redis = new IORedis({
+            ...config,
+            host,
+            port,
+            password,
+          });
+          redis.on('error', async (error) => {
+            Redis.logger.log(`[redisConnect] error event ${error.message}`);
+            await redis.quit();
+            reject(error);
+          });
+          redis.on('connect', () => {
+            Redis.logger.log(`[redisConnect] connect success event`);
+            resolve(redis);
+          });
+          redis.on('close', () => {
+            Redis.logger.log(`[redisConnect] close event`);
+          });
+        });
+      } catch (error) {
+        Redis.logger.log(`[redisConnect] error ${error.message}`);
+        return {
+          success: false,
+          errorMessage: error.message,
+        };
+      }
+      this.redisMap.set(id, redis);
+    }
+
+    return {
+      success: true,
+      data: initKeys ? (await this.redisKeys({ match: '*', id })).data : [],
+    };
+  }
+
+  @WsErrorCatch()
+  async redisDisConnect({ id }) {
+    Redis.logger.log(`redis:disConnect ${id}`);
+    const redis = this.redisMap.get(id);
+    this.redisMap.delete(id);
+    if (redis) {
+      redis.removeAllListeners();
+      await redis.quit();
+    }
+
+    return {
+      success: true,
+    };
+  }
+
+  @WsErrorCatch()
+  async deleteRedisKey(
+    @MessageBody() { id, refreshKeys = true, keys, match, count, method },
+  ) {
+    Redis.logger.log(
+      `redis:deleteKey start ${keys.map((v) => v.key).join(',')}`,
+    );
+    const redis = this.redisMap.get(id);
+    if (!redis) return { errorMessage: 'redis 已断开连接' };
+
+    method = method === 'unlink' ? 'unlink' : 'del';
+
+    await Promise.all([
+      // 普通的 key
+      Promise.all(
+        keys.filter((v) => v.isLeaf).map((v) => redis[method](v.key).catch()),
+      ),
+      // 前缀 key
+      Promise.all(
+        keys
+          .filter((v) => !v.isLeaf)
+          .map((v) => {
+            return new Promise((resolve) => {
+              if (!v.key) {
+                resolve(true);
+                return;
+              }
+
+              const stream = redis.scanStream({
+                match: `${v.key}:*`,
+                count: 50,
+              });
+
+              stream.on('data', async (resultKeys) => {
+                stream.pause();
+                await Promise.all(resultKeys.map((key) => redis[method](key)));
+                stream.resume();
+              });
+              stream.on('end', () => resolve(true));
+              stream.on('error', () => resolve(true));
+            });
+          }),
+      ),
+    ]);
+
+    return {
+      success: true,
+      data: refreshKeys
+        ? (await this.redisKeys({ match, id, count })).data
+        : [],
+    };
+  }
+
+  @WsErrorCatch()
+  async redisKeys({ id, match, needType = true, count = 500 }) {
+    const redis = this.redisMap.get(id);
+    if (!redis) return { errorMessage: 'redis 已断开连接', data: [] };
+
+    let cursor: undefined | string = undefined;
+    const result: string[] = [];
+    while (cursor !== '0' && result.length < count) {
+      const [currentCursor, currentResult] = await redis.scan(
+        cursor || '0',
+        'match',
+        match || '*',
+        'count',
+        50,
+      );
+
+      cursor = currentCursor;
+      result.push(...currentResult);
+    }
+
+    const keys = _.uniq(_.flatten(result));
+    if (!needType) {
+      return {
+        success: true,
+        data: keys.map((v) => ({ key: v })),
+      };
+    }
+
+    const pipeline = redis.pipeline();
+    keys.forEach((key) => pipeline.type(key));
+    const types = await pipeline.exec();
+    return {
+      success: true,
+      data: keys.map((key, index) => ({
+        key,
+        type: types[index][1],
+      })),
+    };
+  }
+
+  @WsErrorCatch()
+  async redisHScan(@MessageBody() { id, match, key, count = 500 }) {
+    const redis = this.redisMap.get(id);
+    if (!redis) return { errorMessage: 'redis 已断开连接' };
+
+    let cursor: undefined | string = undefined;
+    const result: string[] = [];
+    while (cursor !== '0' && result.length / 2 < count) {
+      const [currentCursor, currentResult] = await redis.hscan(
+        key,
+        cursor || '0',
+        'match',
+        match || '*',
+        'count',
+        50,
+      );
+
+      cursor = currentCursor;
+      result.push(...currentResult);
+    }
+
+    return {
+      success: true,
+      data: result,
+    };
+  }
+
+  @WsErrorCatch()
+  async redisSScan(@MessageBody() { id, match, key, count = 500 }) {
+    const redis = this.redisMap.get(id);
+    if (!redis) return { errorMessage: 'redis 已断开连接' };
+
+    let cursor: undefined | string = undefined;
+    const result: string[] = [];
+    while (cursor !== '0' && result.length < count) {
+      const [currentCursor, currentResult] = await redis.sscan(
+        key,
+        cursor || '0',
+        'match',
+        match || '*',
+        'count',
+        50,
+      );
+
+      cursor = currentCursor;
+      result.push(...currentResult);
+    }
+
+    return {
+      success: true,
+      data: result,
+    };
+  }
+
+  @WsErrorCatch()
+  async redisCommand(@MessageBody() { id, command, params }) {
+    const redis = this.redisMap.get(id);
+    if (!redis) return { errorMessage: 'redis disconnect' };
+
+    try {
+      const data = await redis[command](...params);
+      return { success: true, data };
+    } catch (e) {
+      Redis.logger.error(`redis:command ${e.message}`);
+      return { errorMessage: e.message };
+    }
+  }
+
+  @WsErrorCatch()
+  async redisInfo(@MessageBody() { id }) {
+    const redis = this.redisMap.get(id);
+    if (!redis) {
+      return { errorMessage: 'redis disconnect' };
+    }
+    try {
+      const [[, keyspace], [, info], [, [, databases]]] = await redis
+        .pipeline()
+        .info('keyspace')
+        .info()
+        .config('get', 'databases')
+        .exec();
+      const parseInfo = redisInfoParser(info);
+      return {
+        success: true,
+        data: {
+          databases: Number.parseInt(databases),
+          keyspace: _.pick(redisInfoParser(keyspace), ['databases']),
+          cpu: _.pick(parseInfo, ['used_cpu_sys', 'used_cpu_user']),
+          memory: _.pick(parseInfo, [
+            'maxmemory',
+            'used_memory',
+            'total_system_memory',
+          ]),
+          server: _.pick(parseInfo, ['redis_version', 'uptime_in_days']),
+          clients: _.pick(parseInfo, ['connected_clients', 'blocked_clients']),
+          time: Date.now(),
+        },
+      };
+    } catch (e) {
+      Redis.logger.error(`redis:redisInfo ${e.message}`);
+      return { errorMessage: e.message };
+    }
+  }
+
+  handleDisconnect(connectionId?: string) {
+    if (connectionId) {
+      const connection = this.connectionMap.get(connectionId);
+      if (connection) {
+        this.connectionMap.delete(connectionId);
+        connection.dispose();
+      }
+
+      return;
+    }
+
+    for (const [id, connection] of Object.entries(this.connectionMap)) {
+      this.connectionMap.delete(id);
+      connection.dispose();
+    }
+
+    for (const [id, redis] of Object.entries(this.redisMap)) {
+      redis.quit();
+      this.redisMap.delete(id);
+    }
+  }
+}
+
+export class ServerStatus extends Base {
+  static logger: Logger = new Logger('ServerStatus');
+  static NvmNodePath = '.terminal.icu/versions/node/v8.17.0/bin/node';
+  connectionMap: Map<string, NodeSSH> = new Map();
+
+  constructor(private socket: ConsoleSocket) {
+    super();
+  }
+
+  private static async hasNode(connection: NodeSSH) {
+    // 检查本机 node 是否已经安装
+    const { stdout } = await ServerStatus.execs(connection, 'node -v');
+
+    if (
+      stdout &&
+      Number.parseInt(stdout.replace('v', '').split('.')[0], 10) >= 8
+    ) {
+      return true;
+    }
+  }
+
+  private static async hasNvmNode(connection: NodeSSH) {
+    // 检查是否已经安装 nvm & node v8.17.0
+    const { stdout } = await ServerStatus.execs(
+      connection,
+      `if [ -f "${ServerStatus.NvmNodePath}" ]; then echo 'exists' ;fi`,
     );
 
-    _.set(
+    if (stdout === 'exists') {
+      return true;
+    }
+  }
+
+  private echoLargeFile(connection: NodeSSH, str: string) {
+    // 首先使用 sftp
+    const sftp = await connection.requestSFTP();
+    // const shell =
+    // _.chunk( str.split(''), 1000).forEach((chunkStrArray) =>{
+    //
+    // })
+  }
+
+  private static async installNode(connection: NodeSSH) {
+    const nvmSh = await readFile(Path.join(__dirname, 'detector/nvm.sh'));
+
+    await ServerStatus.execs(
       connection,
-      KEYS.clearConnectionTimeoutHolder,
-      clearConnectionTimeoutHolder,
+      `mkdir -p .terminal.icu \
+      && echo "${nvmSh.toString()}" > .terminal.icu/nvm.sh \
+      `,
+    ).then(console.log);
+
+    // 官方源
+    await ServerStatus.execs(
+      connection,
+      `source .terminal.icu/nvm.sh && nvm install 8.17.0`,
+    );
+
+    // 不行就淘宝
+    if (!(await ServerStatus.hasNvmNode(connection))) {
+      await ServerStatus.execs(
+        connection,
+        `source .terminal.icu/nvm.sh && export NVM_NODEJS_ORG_MIRROR=https://npm.taobao.org/mirrors/node && nvm install 8.17.0`,
+      );
+    }
+  }
+
+  private static async installJs(connection: NodeSSH) {
+    const [baseJs, infoJs] = await Promise.all([
+      readFile(Path.join(__dirname, 'detector/base.js')),
+      readFile(Path.join(__dirname, 'detector/info.js')),
+    ]);
+
+    await ServerStatus.execs(
+      connection,
+      `mkdir -p .terminal.icu \
+      && echo "${baseJs.toString()}" > .terminal.icu/base.js \
+      && echo "${infoJs.toString()}" > .terminal.icu/info.js \
+      `,
     );
   }
 
-  private async initAgent(connection: NodeSSH) {
-    this.logger.log('[initAgent] start');
-    try {
-      if (_.get(connection, '_initAgentLock')) return;
-      _.set(connection, '_initAgentLock', true);
-
-      let nodePath = '';
-      // 检查node是否已经安装
-      const nativeNode = await AppService.execs(connection, 'node -v');
-
-      if (
-        nativeNode.stdout &&
-        Number.parseInt(nativeNode.stdout.replace('v', '').split('.')[0], 10) >=
-          8
-      ) {
-        nodePath = 'node';
+  handleDisconnect(connectionId?: string) {
+    if (connectionId) {
+      const connection = this.connectionMap.get(connectionId);
+      if (connection) {
+        this.connectionMap.delete(connectionId);
+        connection.dispose();
       }
 
-      if (!nodePath) {
-        // 初始化 node
-        const checkIsInitNode = await AppService.execs(
-          connection,
-          '.terminal.icu/node/bin/node -v',
-        );
-        if (checkIsInitNode.stdout) {
-          nodePath = '.terminal.icu/node/bin/node';
-        }
-
-        if (!checkIsInitNode.stdout) {
-          await AppService.execs(connection, 'mkdir -p .terminal.icu/agent');
-
-          this.logger.log('[initAgent] install node start');
-          // 传送检查脚本
-          await connection.putFile(
-            Path.join(__dirname, 'detector/detect-node.sh'),
-            '.terminal.icu/agent/detect-node.sh',
-          );
-
-          const { stdout: nodeRelease, stderr } = await AppService.execs(
-            connection,
-            'bash .terminal.icu/agent/detect-node.sh',
-          );
-
-          if (stderr) {
-            throw new Error(`[initAgent] bash not support ${stderr}`);
-          }
-
-          const nodeVersion = nodeRelease.split('-')[1];
-          this.logger.log(`[initAgent] install node version ${nodeRelease}`);
-
-          // 尝试外网安装，速度快，不限速
-          this.logger.log(`[initAgent] install node use wget`);
-          const data = await AppService.execs(
-            connection,
-            'cd .terminal.icu' +
-              `&& wget --timeout=10 http://npm.taobao.org/mirrors/node/${nodeVersion}/${nodeRelease}`,
-          );
-
-          if (data.stderr && !data.stderr.includes('100%')) {
-            this.logger.log(`[initAgent] install node use sftp`);
-
-            // 无法访问外网，则代下载并发送
-            // 判断文件是否存在
-            const fileExists = fs.existsSync(
-              Path.join(__dirname, `node/${nodeRelease}`),
-            );
-            if (!fileExists) {
-              if (!fs.existsSync(Path.join(__dirname, `node`))) {
-                fs.mkdirSync(Path.join(__dirname, `node`));
-              }
-              // 下载
-              await fetch(
-                `http://npm.taobao.org/mirrors/node/${nodeVersion}/${nodeRelease}`,
-              )
-                .then((res) => res.buffer())
-                .then((buffer) => {
-                  fs.writeFileSync(
-                    Path.join(__dirname, `node/${nodeRelease}`),
-                    buffer,
-                  );
-                });
-            }
-
-            try {
-              await connection.putFile(
-                Path.join(__dirname, `node/${nodeRelease}`),
-                `.terminal.icu/${nodeRelease}`,
-              );
-            } catch (error) {
-              this.logger.error('[init agent] error', error);
-              throw error;
-            }
-          }
-
-          // 解压缩
-          const compressResult = await AppService.execs(
-            connection,
-            'cd .terminal.icu' +
-              `&& tar -xzf ${nodeRelease}` +
-              `&& rm ${nodeRelease}` +
-              `&& rm -rf node` +
-              `&& mv ${nodeRelease.replace('.tar.gz', '')} node`,
-          );
-
-          if (!compressResult.stderr) {
-            nodePath = '.terminal.icu/node/bin/node';
-          }
-          this.logger.log(
-            '[init agent] compressResult',
-            JSON.stringify(compressResult),
-          );
-        }
-      }
-
-      // 初始化脚本
-      try {
-        await AppService.execs(connection, 'mkdir -p .terminal.icu/agent');
-      } catch (e) {}
-
-      await connection.putFiles(
-        [
-          {
-            local: Path.join(__dirname, 'detector/base.js'),
-            remote: '.terminal.icu/agent/base.js',
-          },
-          {
-            local: Path.join(__dirname, 'detector/linuxInfo.js'),
-            remote: '.terminal.icu/agent/linuxInfo.js',
-          },
-        ],
-        { concurrency: 2 },
-      );
-
-      // 初始化监控
-      if (nodePath) {
-        const statusShell = await connection.requestShell({
-          env: { HISTIGNORE: '*' },
-        });
-        statusShell.write(`${nodePath} .terminal.icu/agent/linuxInfo.js\r\n`);
-        _.set(connection, KEYS.statusShell, statusShell);
-        // statusShell.on('data', (data) => {
-        //   console.log(data.toString());
-        // });
-      }
-      this.logger.log('[initAgent] done');
-    } catch (error) {
-      this.logger.error('[initAgent] error', error.stack);
+      return;
     }
+
+    for (const [id, connection] of Object.entries(this.connectionMap)) {
+      this.connectionMap.delete(id);
+      connection.dispose();
+    }
+  }
+
+  @WsErrorCatch()
+  async startFresh(configOrConnection: ConnectionConfig | NodeSSH) {
+    let connection: NodeSSH;
+    if (configOrConnection instanceof NodeSSH) {
+      connection = configOrConnection;
+    } else {
+      connection = await this.getConnection(configOrConnection);
+    }
+
+    if (_.get(connection, KEYS.serverStatusLock)) return;
+    _.set(connection, KEYS.serverStatusLock, true);
+
+    let nodePath = '';
+    if (await ServerStatus.hasNvmNode(connection)) {
+      nodePath = ServerStatus.NvmNodePath;
+    }
+    // 尝试使用本地 node
+    if (!nodePath && (await ServerStatus.hasNode(connection))) {
+      nodePath = 'node';
+    }
+    // 通过 nvm 安装 node
+    if (!nodePath) {
+      await ServerStatus.installNode(connection);
+      // 再次检查是否安装 node
+      if (await ServerStatus.hasNvmNode(connection)) {
+        nodePath = ServerStatus.NvmNodePath;
+      }
+    }
+    // TODO 还是不行通过本地直接传送
+
+    // 安装客户端
+    if (nodePath) {
+      await ServerStatus.installJs(connection);
+
+      // 启动
+      const statusShell = await connection.requestShell({
+        env: {
+          HISTIGNORE: '*',
+          HISTSIZE: '0',
+          HISTFILESIZE: '0',
+          HISTCONTROL: 'ignorespace',
+        },
+      });
+      statusShell.write(`${nodePath} .terminal.icu/info.js\r\n`);
+      _.set(connection, KEYS.statusShell, statusShell);
+      statusShell.on('data', (data) => {
+        console.log(data);
+      });
+    }
+  }
+
+  @WsErrorCatch()
+  async ServerStatus(connectionId: string) {
+    const connection = await this.getConnection(connectionId);
+    if (!connection) {
+      return { errorMessage: 'connectionNotFound' };
+    }
+
+    if (!connection.isConnected()) {
+      await connection.connect(_.get(connection, KEYS.connectionConfig));
+      _.set(connection, KEYS.serverStatusLock, false);
+      await this.startFresh(connection);
+    }
+
+    const { stdout } = await ServerStatus.execs(
+      connection,
+      'cat .terminal.icu/status.txt',
+    );
+
+    return { data: JSON.parse(stdout) };
+  }
+
+  private async stopFresh() {
+    //
   }
 }

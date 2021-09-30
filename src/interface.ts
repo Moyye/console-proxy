@@ -12,9 +12,14 @@ import {
   WriteStreamOptions,
 } from 'ssh2-streams';
 import stream from 'stream';
+import { Forward, Sftp, Shell, Redis, ServerStatus } from './app.service';
 
 export interface ConsoleSocket extends Socket {
-  connectionMap?: Node;
+  shellService?: Shell;
+  sftpService?: Sftp;
+  frowardService?: Forward;
+  serverStatusService?: ServerStatus;
+  redisService?: Redis;
 }
 
 export interface SFTP extends events.EventEmitter {

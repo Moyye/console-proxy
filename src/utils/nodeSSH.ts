@@ -473,7 +473,7 @@ export class NodeSSH {
     );
     invariant(
       options.stream == null ||
-      ['both', 'stdout', 'stderr'].includes(options.stream),
+        ['both', 'stdout', 'stderr'].includes(options.stream),
       'options.stream must be one of both, stdout, stderr',
     );
     for (let i = 0, { length } = parameters; i < length; i += 1) {

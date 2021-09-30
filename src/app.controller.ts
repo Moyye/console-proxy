@@ -1,17 +1,17 @@
 import { Body, Controller, Delete, Get, Param, Post } from '@nestjs/common';
 import fetch from 'node-fetch';
 import { ForwardInRequestDto, ForwardInResponseDto } from './dto';
-import { AppService } from './app.service';
+import { Forward } from './app.service';
 
 @Controller()
 export class AppController {
-  constructor(private readonly appService: AppService) {}
+  constructor(private readonly forwardService: Forward) {}
 
   @Post('/forward-in')
   async newForwardIn(
     @Body() body: ForwardInRequestDto,
   ): Promise<ForwardInResponseDto> {
-    return this.appService.newForwardIn(body);
+    return this.forwardService.newForwardIn(body);
   }
 
   @Delete('/forward/:id')
@@ -19,7 +19,7 @@ export class AppController {
     if (process.env.RUNTIME_ENV === 'OFFICE') {
       return;
     }
-    await this.appService.unForward(id);
+    await this.forwardService.unForward(id);
   }
 
   @Get('/forward-status')
@@ -27,7 +27,7 @@ export class AppController {
     if (process.env.RUNTIME_ENV === 'OFFICE') {
       return;
     }
-    return this.appService.forwardStatus();
+    return this.forwardService.forwardStatus();
   }
 
   @Get('/frpc-status')
