@@ -1423,24 +1423,50 @@ export class ServerStatus extends Base {
     }
   }
 
-  private echoLargeFile(connection: NodeSSH, str: string) {
+  private static async sendLargeTextFile(
+    connection: NodeSSH,
+    files: { local: string; remote: string }[],
+  ) {
     // 首先使用 sftp
-    const sftp = await connection.requestSFTP();
-    // const shell =
-    // _.chunk( str.split(''), 1000).forEach((chunkStrArray) =>{
-    //
-    // })
+    try {
+      await connection.putFiles(files);
+      return true;
+    } catch (err1) {
+      try {
+        const shell = await connection.requestShell({
+          env: {
+            HISTIGNORE: '*',
+            HISTSIZE: '0',
+            HISTFILESIZE: '0',
+            HISTCONTROL: 'ignorespace',
+          },
+        });
+
+        for (const file of files) {
+          const content = (await readFile(file.local)).toString();
+          shell.write(`rm ${file.remote}\r`);
+
+          const strings = content.split('\n');
+          while (strings.length) {
+            const chunk = strings.splice(0, 2).join('');
+            shell.write(`echo "${chunk}" >> ${file.remote}\r`);
+          }
+        }
+      } catch (err2) {
+        return false;
+      }
+    }
   }
 
   private static async installNode(connection: NodeSSH) {
-    const nvmSh = await readFile(Path.join(__dirname, 'detector/nvm.sh'));
+    await ServerStatus.execs(connection, `mkdir -p .terminal.icu`);
 
-    await ServerStatus.execs(
-      connection,
-      `mkdir -p .terminal.icu \
-      && echo "${nvmSh.toString()}" > .terminal.icu/nvm.sh \
-      `,
-    ).then(console.log);
+    await ServerStatus.sendLargeTextFile(connection, [
+      {
+        local: Path.join(__dirname, 'detector/nvm.sh'),
+        remote: '.terminal.icu/nvm.sh',
+      },
+    ]);
 
     // 官方源
     await ServerStatus.execs(
@@ -1458,18 +1484,18 @@ export class ServerStatus extends Base {
   }
 
   private static async installJs(connection: NodeSSH) {
-    const [baseJs, infoJs] = await Promise.all([
-      readFile(Path.join(__dirname, 'detector/base.js')),
-      readFile(Path.join(__dirname, 'detector/info.js')),
-    ]);
+    await ServerStatus.execs(connection, `mkdir -p .terminal.icu`);
 
-    await ServerStatus.execs(
-      connection,
-      `mkdir -p .terminal.icu \
-      && echo "${baseJs.toString()}" > .terminal.icu/base.js \
-      && echo "${infoJs.toString()}" > .terminal.icu/info.js \
-      `,
-    );
+    await ServerStatus.sendLargeTextFile(connection, [
+      {
+        local: Path.join(__dirname, 'detector/base.js'),
+        remote: '.terminal.icu/base.js',
+      },
+      {
+        local: Path.join(__dirname, 'detector/info.js'),
+        remote: '.terminal.icu/info.js',
+      },
+    ]);
   }
 
   handleDisconnect(connectionId?: string) {
@@ -1535,7 +1561,7 @@ export class ServerStatus extends Base {
       statusShell.write(`${nodePath} .terminal.icu/info.js\r\n`);
       _.set(connection, KEYS.statusShell, statusShell);
       statusShell.on('data', (data) => {
-        console.log(data);
+        console.log(data.toString());
       });
     }
   }
