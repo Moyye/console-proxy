@@ -24,6 +24,7 @@ import { ForwardInParams } from './dto';
 import * as fs from 'fs';
 import IORedis from 'ioredis';
 import { parse as redisInfoParser } from 'redis-info';
+import * as shellEscape from 'shell-escape';
 
 const lookup = promisify(dns.lookup);
 const readFile = promisify(fs.readFile);
@@ -245,13 +246,13 @@ export class Provider
   }
 
   @SubscribeMessage('serverStatus:serverStatus')
-  async serverStatus(@MessageBody() { id }) {
-    //
+  async serverStatus(socket: ConsoleSocket, { id }) {
+    return socket.serverStatusService.ServerStatus(id);
   }
 
   @SubscribeMessage('file:new')
   async newSftp(socket: ConsoleSocket, messageBody) {
-    return socket.sftpService.newSftp(messageBody);
+    return socket.sftpService.newSftp({ ...messageBody, ...messageBody.data });
   }
 
   @SubscribeMessage('file:close')
@@ -750,7 +751,7 @@ export class Sftp extends Base {
     }
 
     return {
-      success: true,
+      data: true,
       errorMessage: '',
     };
   }
@@ -1392,7 +1393,7 @@ export class Redis extends Base {
 
 export class ServerStatus extends Base {
   static logger: Logger = new Logger('ServerStatus');
-  static NvmNodePath = '.terminal.icu/versions/node/v8.17.0/bin/node';
+  static NvmNodePath = '.terminal.icu/versions/node/v14.18.0/bin/node';
   connectionMap: Map<string, NodeSSH> = new Map();
 
   constructor(private socket: ConsoleSocket) {
@@ -1412,7 +1413,7 @@ export class ServerStatus extends Base {
   }
 
   private static async hasNvmNode(connection: NodeSSH) {
-    // 检查是否已经安装 nvm & node v8.17.0
+    // 检查是否已经安装 nvm & node
     const { stdout } = await ServerStatus.execs(
       connection,
       `if [ -f "${ServerStatus.NvmNodePath}" ]; then echo 'exists' ;fi`,
@@ -1433,23 +1434,40 @@ export class ServerStatus extends Base {
       return true;
     } catch (err1) {
       try {
-        const shell = await connection.requestShell({
-          env: {
-            HISTIGNORE: '*',
-            HISTSIZE: '0',
-            HISTFILESIZE: '0',
-            HISTCONTROL: 'ignorespace',
-          },
-        });
-
         for (const file of files) {
-          const content = (await readFile(file.local)).toString();
-          shell.write(`rm ${file.remote}\r`);
+          // 删除源文件
+          await ServerStatus.execs(connection, `rm ${file.remote}`);
 
-          const strings = content.split('\n');
-          while (strings.length) {
-            const chunk = strings.splice(0, 2).join('');
-            shell.write(`echo "${chunk}" >> ${file.remote}\r`);
+          const content = (await readFile(file.local))
+            .toString()
+            .split('\n')
+            .reverse();
+          const chunks: string[] = [];
+          let counter = 0;
+          let tmpChunk: string[] = [];
+
+          while (content.length) {
+            const chunk = content.pop();
+
+            counter += chunk.length;
+            tmpChunk.push(chunk);
+            if (counter >= 1000) {
+              chunks.push(tmpChunk.join('\n'));
+              tmpChunk = [];
+              counter = 0;
+            }
+          }
+
+          if (tmpChunk.length) {
+            chunks.push(tmpChunk.join('\n'));
+          }
+
+          chunks.reverse();
+          while (chunks.length) {
+            await ServerStatus.execs(
+              connection,
+              `echo ${shellEscape([chunks.pop()])} >> ${file.remote}`,
+            );
           }
         }
       } catch (err2) {
@@ -1468,18 +1486,24 @@ export class ServerStatus extends Base {
       },
     ]);
 
-    // 官方源
-    await ServerStatus.execs(
-      connection,
-      `source .terminal.icu/nvm.sh && nvm install 8.17.0`,
-    );
+    // 官方
+    this.logger.log('开始', 'nvm 官方安装 node');
 
-    // 不行就淘宝
+    const officeResult = await ServerStatus.execs(
+      connection,
+      `source .terminal.icu/nvm.sh && nvm install 14.18.0`,
+    );
+    this.logger.log(officeResult, 'nvm 官方安装 node');
+
+    // 淘宝
     if (!(await ServerStatus.hasNvmNode(connection))) {
-      await ServerStatus.execs(
+      this.logger.log('开始', 'nvm 淘宝安装 node');
+
+      const taobaoResult = await ServerStatus.execs(
         connection,
-        `source .terminal.icu/nvm.sh && export NVM_NODEJS_ORG_MIRROR=https://npm.taobao.org/mirrors/node && nvm install 8.17.0`,
+        `source .terminal.icu/nvm.sh && export NVM_NODEJS_ORG_MIRROR=https://npm.taobao.org/mirrors/node && nvm install 14.18.0`,
       );
+      this.logger.log(taobaoResult, 'nvm 淘宝安装 node');
     }
   }
 
@@ -1560,9 +1584,9 @@ export class ServerStatus extends Base {
       });
       statusShell.write(`${nodePath} .terminal.icu/info.js\r\n`);
       _.set(connection, KEYS.statusShell, statusShell);
-      statusShell.on('data', (data) => {
-        console.log(data.toString());
-      });
+      // statusShell.on('data', (data) => {
+      //   console.log(data.toString());
+      // });
     }
   }
 
@@ -1584,7 +1608,7 @@ export class ServerStatus extends Base {
       'cat .terminal.icu/status.txt',
     );
 
-    return { data: JSON.parse(stdout) };
+    return { data: JSON.parse(stdout || '{}') };
   }
 
   private async stopFresh() {
