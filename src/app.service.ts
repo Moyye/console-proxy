@@ -594,6 +594,7 @@ export class Shell extends Base {
   async closeShell({ id }) {
     const shell = await this.getShell(id);
     if (shell) {
+      shell.removeAllListeners();
       shell.close();
       this.shellMap.delete(id);
       Shell.logger.log(`[closeShell] shellId: ${id}`);
@@ -621,7 +622,13 @@ export class Shell extends Base {
       }))!;
 
       // 初始化 terminal
-      const shell = (await this.getShell(id, connection))!;
+      const shell = await this.getShell(id, connection);
+
+      // @ts-ignore
+      if (shell.errorMessage) {
+        // @ts-ignore
+        throw new Error(shell.errorMessage);
+      }
 
       // 建立 terminal 监听
       shell.on('data', (data) => {
@@ -632,7 +639,7 @@ export class Shell extends Base {
           this.closeShell({ id });
         }
         this.socket.emit('terminal:data', {
-          data: '连接意外退出,重新连接中\r\n',
+          data: '连接已断开\r\n',
           id,
         });
         setTimeout(() => {
