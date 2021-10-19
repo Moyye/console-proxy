@@ -30,8 +30,9 @@ const lookup = promisify(dns.lookup);
 const readFile = promisify(fs.readFile);
 
 enum KEYS {
-  statusShell = '_statusShell',
-  connectionConfig = 'connectionConfig',
+  statusShell = 'statusShell',
+  connectionSubMap = 'connectionSubMap',
+  connectionId = 'connectionId',
   serverStatusLock = 'serverStatusLock',
 }
 
@@ -116,7 +117,7 @@ export class Forward {
           this.logger.warn('connection close, and retry forward');
           setTimeout(async () => {
             // 移除原来的
-            connection.dispose();
+            connection.dispose(true);
             this.forwardConnectionMap.delete(id);
 
             // 重新连接
@@ -129,7 +130,7 @@ export class Forward {
             if (connection.connection) {
               connection.connection.removeAllListeners('close');
             }
-            connection.dispose();
+            connection.dispose(true);
             this.logger.error(err);
             this.forwardConnectionMap.delete(id);
             reject(err);
@@ -165,7 +166,7 @@ export class Forward {
       const config: ForwardInParams = _.get(connection, '_config');
       connection.connection.removeAllListeners('close');
       connection.connection.unforwardIn(config.remoteAddr, config.remotePort);
-      connection.dispose();
+      connection.dispose(true);
       this.forwardConnectionMap.delete(id);
       this.logger.log('unForward success');
     }
@@ -196,17 +197,20 @@ export class Provider
   }
 
   async handleConnection(socket: ConsoleSocket): Promise<void> {
+    this.logger.log(`Client connected, socketId: ${socket.id}`);
     socket.shellService = new Shell(socket);
     socket.sftpService = new Sftp(socket);
     socket.redisService = new Redis(socket);
     socket.serverStatusService = new ServerStatus(socket);
-    this.logger.log(`Client connected, socketId: ${socket.id}`);
   }
 
   handleDisconnect(socket: ConsoleSocket) {
+    this.logger.log(`Client disconnect, socketId: ${socket.id}`);
+
     socket.shellService.handleDisconnect();
     socket.sftpService.handleDisconnect();
     socket.redisService.handleDisconnect();
+    socket.serverStatusService.handleDisconnect();
     socket.removeAllListeners();
   }
 
@@ -225,6 +229,11 @@ export class Provider
     return socket.shellService.closeShell(messageBody);
   }
 
+  @SubscribeMessage('terminal:disconnect')
+  async terminalDisconnect(socket: ConsoleSocket, { id }) {
+    return socket.shellService.handleDisconnect(id);
+  }
+
   @SubscribeMessage('terminal:input')
   async shellInput(socket: ConsoleSocket, messageBody) {
     return socket.shellService.input(messageBody);
@@ -233,11 +242,6 @@ export class Provider
   @SubscribeMessage('terminal:resize')
   async shellResize(socket: ConsoleSocket, messageBody) {
     return socket.shellService.resize(messageBody);
-  }
-
-  @SubscribeMessage('terminal:disconnect')
-  async shellDisconnect(socket: ConsoleSocket, { id }) {
-    return socket.shellService.handleDisconnect(id);
   }
 
   @SubscribeMessage('serverStatus:startFresh')
@@ -250,6 +254,11 @@ export class Provider
     return socket.serverStatusService.ServerStatus(id);
   }
 
+  @SubscribeMessage('serverStatus:disconnect')
+  async serverStatusDisConnect(socket: ConsoleSocket, { id }) {
+    return socket.serverStatusService.handleDisconnect(id);
+  }
+
   @SubscribeMessage('file:new')
   async newSftp(socket: ConsoleSocket, messageBody) {
     return socket.sftpService.newSftp({ ...messageBody, ...messageBody.data });
@@ -258,6 +267,11 @@ export class Provider
   @SubscribeMessage('file:close')
   async closeSftp(socket: ConsoleSocket, messageBody) {
     return socket.sftpService.closeSftp(messageBody);
+  }
+
+  @SubscribeMessage('file:disconnect')
+  async disconnectSftp(socket: ConsoleSocket, { id }) {
+    return socket.sftpService.handleDisconnect(id);
   }
 
   @SubscribeMessage('file:list')
@@ -387,39 +401,24 @@ class Base {
           HISTIGNORE: '*',
           HISTSIZE: '0',
           HISTFILESIZE: '0',
+          HISTFILE: '/dev/null',
         },
       },
     });
   }
 
   handleConnectionClose(nodeSSH: NodeSSH) {
-    throw new Error('handleConnectionClose 未实现');
-  }
-
-  handleConnectionError(nodeSSH: NodeSSH) {
-    throw new Error('handleConnectionError 未实现');
+    Base.logger.log('handleConnectionClose');
   }
 
   @WsErrorCatch()
-  async preConnect({
-    host,
-    username,
-    password = '',
-    privateKey = '',
-    port = 22,
-  }) {
+  async preConnect({ ...config }) {
     try {
-      await this.getConnection({
-        host: host === 'linuxServer' ? process.env.TMP_SERVER : host,
-        username,
-        port,
-        tryKeyboard: true,
-        keepaliveInterval: 10000,
-        ...(password && { password }),
-        ...(privateKey && { privateKey }),
-      });
+      await this.getConnection(config, undefined, 'preConnect');
 
-      Base.logger.log(`[preConnect] connected, server: ${username}@${host}`);
+      Base.logger.log(
+        `[preConnect] connected, server: ${config.username}@${config.host}`,
+      );
     } catch (error) {
       Base.logger.error('[preConnect] error', error.stack);
       return {
@@ -437,12 +436,17 @@ class Base {
   async getConnection(
     configOrId?: ConnectionConfig | string,
     retryDelay?: number,
+    debugfrom?: string,
   ): Promise<Undefinable<NodeSSH>> {
     if (typeof configOrId === 'string') {
       return this.connectionMap.get(configOrId);
     }
 
     const config = configOrId;
+
+    if (config.host === 'linuxServer') {
+      config.host = process.env.TMP_SERVER;
+    }
     const secretKey = md5(
       `${config.host}${config.username}${config.port}`,
     ).toString();
@@ -476,11 +480,11 @@ class Base {
         }
       }
 
-      // 将连接存一份在 connection 上，重连时可用
-      const connectionConfig = {
+      const connection = await new NodeSSH().connect({
         tryKeyboard: true,
         keepaliveInterval: 10000,
         ...config,
+        readyTimeout: 100000,
         privateKey: config.privateKey || undefined,
         algorithms: {
           kex: [
@@ -543,16 +547,17 @@ class Base {
             'hmac-md5-96',
           ],
         },
-      };
-      const connection = await new NodeSSH().connect(connectionConfig);
-      _.set(connection, KEYS.connectionConfig, connectionConfig);
+      });
+
+      // 方便读取 id, 避免重新计算
+      _.set(connection, KEYS.connectionId, connectionId);
+      _.set(connection, 'debugfrom', debugfrom);
 
       this.connectionMap.set(connectionId, connection);
 
-      // TODO 需要重做
       connection.connection?.on('error', (error) => {
         Base.logger.error('connection server error', error.stack);
-        this.handleConnectionError(connection);
+        this.handleConnectionClose(connection);
       });
       connection.connection?.on('close', () => {
         Base.logger.warn('connection server close');
@@ -584,6 +589,9 @@ export class Shell extends Base {
         term: 'xterm-256color',
       });
       this.shellMap.set(id, shell);
+
+      // 可以根据 connection 找到 shell
+      _.set(connection, `${KEYS.connectionSubMap}.${id}`, shell);
       return shell;
     }
 
@@ -602,24 +610,13 @@ export class Shell extends Base {
   }
 
   @WsErrorCatch()
-  async newShell({
-    id,
-    host,
-    username,
-    password = '',
-    privateKey = '',
-    port = 22,
-    ...otherOptions
-  }) {
+  async newShell({ id, ...config }) {
     try {
-      const connection = (await this.getConnection({
-        host: host === 'linuxServer' ? process.env.TMP_SERVER : host,
-        username,
-        port,
-        password,
-        privateKey,
-        ...otherOptions,
-      }))!;
+      const connection = (await this.getConnection(
+        config,
+        undefined,
+        'shell',
+      ))!;
 
       // 初始化 terminal
       const shell = await this.getShell(id, connection);
@@ -635,11 +632,10 @@ export class Shell extends Base {
         this.socket.emit('terminal:data', { data: data.toString(), id });
       });
       shell.on('close', () => {
-        if (connection.isConnected()) {
-          this.closeShell({ id });
-        }
+        this.closeShell({ id });
+
         this.socket.emit('terminal:data', {
-          data: '连接已断开\r\n',
+          data: 'connection close\r\nwill reconnect after 2 second\r\n',
           id,
         });
         setTimeout(() => {
@@ -648,12 +644,17 @@ export class Shell extends Base {
       });
 
       shell.on('error', (error) => {
-        Shell.logger.error(`[shell]: ${host}${username} error`, error.stack());
+        Shell.logger.error(
+          `[shell]: ${config.host}${config.username} error`,
+          error.stack(),
+        );
       });
 
-      Shell.logger.log(`[newTerminal] connected, server: ${username}@${host}`);
+      Shell.logger.log(
+        `[newShell] connected, server: ${config.username}@${config.host}`,
+      );
     } catch (error) {
-      Shell.logger.error('[newTerminal] error', error.stack);
+      Shell.logger.error('[newShell] error', error.stack);
       return {
         success: false,
         errorMessage: error.message,
@@ -681,20 +682,35 @@ export class Shell extends Base {
       const connection = this.connectionMap.get(connectionId);
       if (connection) {
         this.connectionMap.delete(connectionId);
-        connection.dispose();
+        connection.dispose(true);
       }
 
       return;
     }
 
-    for (const [id, connection] of Object.entries(this.connectionMap)) {
+    this.connectionMap.forEach((connection, id) => {
       this.connectionMap.delete(id);
-      connection.dispose();
-    }
+      connection.dispose(true);
+    });
 
-    for (const [id, shell] of Object.entries(this.shellMap)) {
+    this.shellMap.forEach((shell, id) => {
       shell.close();
       this.shellMap.delete(id);
+    });
+  }
+
+  handleConnectionClose(connection: NodeSSH) {
+    const connectionId = _.get(connection, KEYS.connectionId);
+    Shell.logger.log(`[handleConnectionClose] connectionId: ${connectionId}`);
+    this.handleDisconnect(connectionId);
+
+    const shells = _.get(connection, KEYS.connectionSubMap);
+    if (shells) {
+      for (const [id, shell] of Object.entries(shells)) {
+        Shell.logger.log(`[handleConnectionClose] shellId: ${id}`);
+
+        // (shell as ClientChannel).emit('close');
+      }
     }
   }
 }
@@ -728,24 +744,9 @@ export class Sftp extends Base {
   }
 
   @WsErrorCatch()
-  async newSftp({
-    id,
-    host,
-    username,
-    password = '',
-    privateKey = '',
-    port = 22,
-    ...otherOptions
-  }) {
+  async newSftp({ id, ...config }) {
     try {
-      const connection = (await this.getConnection({
-        host: host === 'linuxServer' ? process.env.TMP_SERVER : host,
-        username,
-        port,
-        password,
-        privateKey,
-        ...otherOptions,
-      }))!;
+      const connection = (await this.getConnection(config, undefined, 'sftp'))!;
 
       const sftp: unknown = await connection.requestSFTP();
       this.sftpMap.set(id, Sftp.sftpPromisify(sftp));
@@ -1073,21 +1074,21 @@ export class Sftp extends Base {
       const connection = this.connectionMap.get(connectionId);
       if (connection) {
         this.connectionMap.delete(connectionId);
-        connection.dispose();
+        connection.dispose(true);
       }
 
       return;
     }
 
-    for (const [id, connection] of Object.entries(this.connectionMap)) {
+    this.connectionMap.forEach((connection, id) => {
       this.connectionMap.delete(id);
-      connection.dispose();
-    }
+      connection.dispose(true);
+    });
 
-    for (const [id, sftp] of Object.entries(this.sftpMap)) {
+    this.sftpMap.forEach((sftp, id) => {
       sftp.end();
       this.sftpMap.delete(id);
-    }
+    });
   }
 }
 
@@ -1380,21 +1381,21 @@ export class Redis extends Base {
       const connection = this.connectionMap.get(connectionId);
       if (connection) {
         this.connectionMap.delete(connectionId);
-        connection.dispose();
+        connection.dispose(true);
       }
 
       return;
     }
 
-    for (const [id, connection] of Object.entries(this.connectionMap)) {
+    this.connectionMap.forEach((connection, id) => {
       this.connectionMap.delete(id);
-      connection.dispose();
-    }
+      connection.dispose(true);
+    });
 
-    for (const [id, redis] of Object.entries(this.redisMap)) {
+    this.redisMap.forEach((redis, id) => {
       redis.quit();
       this.redisMap.delete(id);
-    }
+    });
   }
 }
 
@@ -1534,16 +1535,16 @@ export class ServerStatus extends Base {
       const connection = this.connectionMap.get(connectionId);
       if (connection) {
         this.connectionMap.delete(connectionId);
-        connection.dispose();
+        connection.dispose(true);
       }
 
       return;
     }
 
-    for (const [id, connection] of Object.entries(this.connectionMap)) {
+    this.connectionMap.forEach((connection, id) => {
       this.connectionMap.delete(id);
-      connection.dispose();
-    }
+      connection.dispose(true);
+    });
   }
 
   @WsErrorCatch()
@@ -1605,7 +1606,7 @@ export class ServerStatus extends Base {
     }
 
     if (!connection.isConnected()) {
-      await connection.connect(_.get(connection, KEYS.connectionConfig));
+      await connection.reconnect();
       _.set(connection, KEYS.serverStatusLock, false);
       await this.startFresh(connection);
     }
@@ -1616,9 +1617,5 @@ export class ServerStatus extends Base {
     );
 
     return { data: JSON.parse(stdout || '{}') };
-  }
-
-  private async stopFresh() {
-    //
   }
 }

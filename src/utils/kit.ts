@@ -1,5 +1,6 @@
 import { AES, enc, MD5 } from 'crypto-js';
 import { Logger } from '@nestjs/common';
+
 const logger: Logger = new Logger('Kit');
 
 export const md5 = (str: string): string => {
@@ -24,14 +25,17 @@ export function sleep(ms: number): Promise<void> {
   });
 }
 
-export function WsErrorCatch(): MethodDecorator {
+export function WsErrorCatch(originError = false): MethodDecorator {
   return (_, __, descriptor: TypedPropertyDescriptor<any>): void => {
     const originalMethod = descriptor.value;
     descriptor.value = async function fn(...args) {
       try {
         return await originalMethod.apply(this, [...args]);
       } catch (e) {
-        logger.error('[WsErrorCatch] error', e.stack);
+        logger.error('[WsErrorCatch] error', e.stack || e.message);
+        if (originError) {
+          return e;
+        }
         return {
           errorMessage: e.message,
         };

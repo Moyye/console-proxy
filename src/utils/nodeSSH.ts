@@ -148,8 +148,11 @@ async function makeDirectoryWithSftp(path: string, sftp: SFTPWrapper) {
 
 export class NodeSSH {
   connection: SSH2.Client | null = null;
+  connectionConfig: Config;
 
   public async connect(givenConfig: Config): Promise<this> {
+    this.connectionConfig = givenConfig;
+
     invariant(
       givenConfig != null && typeof givenConfig === 'object',
       'config must be a valid object',
@@ -281,7 +284,7 @@ export class NodeSSH {
   async requestShell(
     options?: PseudoTtyOptions | ShellOptions | false,
   ): Promise<ClientChannel> {
-    const connection = this.getConnection();
+    const connection = await this.getConnection();
 
     return new Promise((resolve, reject) => {
       const callback = (err: Error | undefined, res: ClientChannel) => {
@@ -321,7 +324,7 @@ export class NodeSSH {
   }
 
   async requestSFTP(): Promise<SFTPWrapper> {
-    const connection = this.getConnection();
+    const connection = await this.getConnection();
 
     return new Promise((resolve, reject) => {
       connection.sftp((err, res) => {
@@ -396,7 +399,7 @@ export class NodeSSH {
     if (options.cwd) {
       command = `cd ${shellEscape([options.cwd])} ; ${command}`;
     }
-    const connection = this.getConnection();
+    const connection = await this.getConnection();
 
     const output: { stdout: string[]; stderr: string[] } = {
       stdout: [],
@@ -473,7 +476,7 @@ export class NodeSSH {
     );
     invariant(
       options.stream == null ||
-        ['both', 'stdout', 'stderr'].includes(options.stream),
+      ['both', 'stdout', 'stderr'].includes(options.stream),
       'options.stream must be one of both, stdout, stderr',
     );
     for (let i = 0, { length } = parameters; i < length; i += 1) {
@@ -1146,14 +1149,21 @@ export class NodeSSH {
     return !failed;
   }
 
-  dispose() {
+  dispose(removeListener = false) {
     if (this.connection) {
-      this.connection.end();
+      if (removeListener) {
+        this.connection.removeAllListeners();
+      }
+      this.connection?.end();
       this.connection = null;
     }
   }
 
-  private getConnection(): SSH2.Client {
+  async reconnect() {
+    await this.connect(this.connectionConfig);
+  }
+
+  private async getConnection(): Promise<SSH2.Client> {
     const { connection } = this;
     if (connection == null) {
       throw new Error('Not connected to server');
