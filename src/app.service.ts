@@ -445,6 +445,9 @@ export class Shell extends Base {
 
       // 可以根据 connection 找到 shell
       _.set(connection, `${KEYS.connectionSubMap}.${id}`, shell);
+
+      // 可以根据 shell 获取 connection
+      _.set(shell, KEYS.connectionId, connection);
       return shell;
     }
 
@@ -453,12 +456,32 @@ export class Shell extends Base {
 
   @WsErrorCatch()
   async closeShell({ id }) {
+    // i love you baby
     const shell = await this.getShell(id);
     if (shell) {
       shell.removeAllListeners();
       shell.close();
       this.shellMap.delete(id);
       Shell.logger.log(`[closeShell] shellId: ${id}`);
+
+      // 获取 connection 如果没有其他的 shell 连接了就直接关闭
+      const connection = _.get(shell, KEYS.connectionId);
+      const connectionId = _.get(connection, KEYS.connectionId);
+
+      if (connection && connectionId) {
+        const shells = _.get(connection, KEYS.connectionSubMap);
+        if (!shells) {
+          // 如果没有直接关闭
+          this.handleDisconnect(connectionId);
+        }
+        // 剔除本次连接
+        delete shells[id];
+
+        // 检查是否还有其他的连接，没有就关闭连接
+        if (_.isEmpty(shells)) {
+          this.handleDisconnect(connectionId);
+        }
+      }
     }
   }
 

@@ -135,8 +135,6 @@ async function getOs(result) {
   };
 }
 
-let counter = 0;
-
 async function refresh() {
   const refreshTimeInterval = 4000;
   const statusFilePath = path.join(__dirname, 'status.txt');
