@@ -427,7 +427,7 @@ export class Shell extends Base {
           if (_.isEmpty(shells)) {
             this.handleDisconnect(connectionId);
           }
-        }, 5000);
+        }, 1000);
       }
     }
   }
@@ -440,6 +440,11 @@ export class Shell extends Base {
         undefined,
         'shell',
       ))!;
+
+      // 已存在
+      if (this.shellMap.get(id)) {
+        return;
+      }
 
       // 初始化 terminal
       const shell = await this.getShell(id, connection);
