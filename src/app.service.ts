@@ -339,10 +339,10 @@ class Base {
         tryKeyboard: true,
         keepaliveInterval: 10000,
         readyTimeout: 100000,
-        privateKey: config.privateKey || undefined,
         ...config,
         host:
           config.host === 'linuxServer' ? process.env.TMP_SERVER : config.host,
+        privateKey: config.privateKey || undefined,
       });
 
       // 方便读取 id, 避免重新计算
