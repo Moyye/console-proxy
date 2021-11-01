@@ -46,6 +46,21 @@ export class AppController {
     }
   }
 
+  @Get('/frpc-reload')
+  async frpcReload() {
+    if (process.env.RUNTIME_ENV === 'OFFICE') {
+      return false;
+    }
+
+    try {
+      await fetch('http://localhost:22335/api/reload');
+      return true;
+    } catch (error) {
+      console.log(error);
+      return false;
+    }
+  }
+
   @Get()
   ping(): string {
     return 'pong';

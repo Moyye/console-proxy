@@ -12,7 +12,7 @@ async function bootstrap() {
   });
 
   console.log('listen PORT', process.env.PORT);
-  await app.listen(process.env.PORT);
+  await app.listen(22334);
 }
 bootstrap().then();
 
