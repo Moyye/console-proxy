@@ -302,12 +302,13 @@ class Base {
 
     const config = configOrId;
 
-    if (config.host === 'linuxServer') {
-      config.host = process.env.TMP_SERVER;
-    }
     const secretKey = md5(
       `${config.host}${config.username}${config.port}`,
     ).toString();
+
+    if (config.host === 'linuxServer') {
+      config.host = process.env.TMP_SERVER || '';
+    }
 
     if (config.password) {
       config.password = decrypt(config.password, secretKey);
