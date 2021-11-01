@@ -97,6 +97,12 @@ export class Provider
     return socket.shellService.resize(messageBody);
   }
 
+  @SubscribeMessage('serverStatus:hasInit')
+  async serverStatusHasInit(socket: ConsoleSocket, MessageBody) {
+    const { init } = await socket.serverStatusService.hasInit(MessageBody);
+    return init;
+  }
+
   @SubscribeMessage('serverStatus:startFresh')
   async serverStatusStartFresh(socket: ConsoleSocket, MessageBody) {
     return socket.serverStatusService.startFresh(MessageBody);
@@ -467,20 +473,24 @@ export class Shell extends Base {
       // 获取 connection 如果没有其他的 shell 连接了就直接关闭
       const connection = _.get(shell, KEYS.connectionId);
       const connectionId = _.get(connection, KEYS.connectionId);
-
-      if (connection && connectionId) {
-        const shells = _.get(connection, KEYS.connectionSubMap);
-        if (!shells) {
-          // 如果没有直接关闭
-          this.handleDisconnect(connectionId);
-        }
-        // 剔除本次连接
+      const shells = _.get(connection, KEYS.connectionSubMap);
+      // 剔除本次连接
+      if (shells) {
         delete shells[id];
+      }
+      if (connection && connectionId) {
+        setTimeout(() => {
+          const shells = _.get(connection, KEYS.connectionSubMap);
+          if (!shells) {
+            // 如果没有直接关闭
+            this.handleDisconnect(connectionId);
+          }
 
-        // 检查是否还有其他的连接，没有就关闭连接
-        if (_.isEmpty(shells)) {
-          this.handleDisconnect(connectionId);
-        }
+          // 检查是否还有其他的连接，没有就关闭连接
+          if (_.isEmpty(shells)) {
+            this.handleDisconnect(connectionId);
+          }
+        }, 5000);
       }
     }
   }
@@ -1276,9 +1286,12 @@ export class ServerStatus extends Base {
     super();
   }
 
-  private static async hasNode(connection: NodeSSH) {
+  private static async hasNode(connection: NodeSSH, command?: string) {
     // 检查本机 node 是否已经安装
-    const { stdout } = await ServerStatus.execs(connection, 'node -v');
+    const { stdout } = await ServerStatus.execs(
+      connection,
+      command || 'node -v',
+    );
 
     if (
       stdout &&
@@ -1419,6 +1432,15 @@ export class ServerStatus extends Base {
   }
 
   @WsErrorCatch()
+  async hasInit(config: ConnectionConfig) {
+    const connection = await this.getConnection(config);
+
+    return {
+      init: await ServerStatus.hasNvmNode(connection),
+    };
+  }
+
+  @WsErrorCatch()
   async startFresh(configOrConnection: ConnectionConfig | NodeSSH) {
     let connection: NodeSSH;
     if (configOrConnection instanceof NodeSSH) {
@@ -1434,10 +1456,7 @@ export class ServerStatus extends Base {
     if (await ServerStatus.hasNvmNode(connection)) {
       nodePath = ServerStatus.NvmNodePath;
     }
-    // 尝试使用本地 node
-    if (!nodePath && (await ServerStatus.hasNode(connection))) {
-      nodePath = 'node';
-    }
+
     // 通过 nvm 安装 node
     if (!nodePath) {
       await ServerStatus.installNode(connection);
@@ -1445,6 +1464,19 @@ export class ServerStatus extends Base {
       if (await ServerStatus.hasNvmNode(connection)) {
         nodePath = ServerStatus.NvmNodePath;
       }
+    }
+
+    // 尝试使用本地 node
+    if (!nodePath && (await ServerStatus.hasNode(connection))) {
+      nodePath = 'node';
+    }
+
+    // 尝试使用旧版本
+    if (
+      !nodePath &&
+      (await ServerStatus.hasNode(connection, '.terminal.icu/node/bin/node -v'))
+    ) {
+      nodePath = '.terminal.icu/node/bin/node';
     }
     // TODO 还是不行通过本地直接传送
 
