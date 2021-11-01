@@ -306,10 +306,6 @@ class Base {
       `${config.host}${config.username}${config.port}`,
     ).toString();
 
-    if (config.host === 'linuxServer') {
-      config.host = process.env.TMP_SERVER || '';
-    }
-
     if (config.password) {
       config.password = decrypt(config.password, secretKey);
     }
@@ -342,9 +338,11 @@ class Base {
       const connection = await new NodeSSH().connect({
         tryKeyboard: true,
         keepaliveInterval: 10000,
-        ...config,
         readyTimeout: 100000,
         privateKey: config.privateKey || undefined,
+        ...config,
+        host:
+          config.host === 'linuxServer' ? process.env.TMP_SERVER : config.host,
       });
 
       // 方便读取 id, 避免重新计算
@@ -933,13 +931,13 @@ export class Redis extends Base {
 
   @WsErrorCatch()
   async redisConnect({
-    id,
-    host,
-    password,
-    initKeys = true,
-    port = 6379,
-    ...config
-  }) {
+                       id,
+                       host,
+                       password,
+                       initKeys = true,
+                       port = 6379,
+                       ...config
+                     }) {
     Redis.logger.log(
       `[redisConnect] start ${id} initKeys: ${initKeys} ${host}`,
     );
@@ -1477,16 +1475,16 @@ export class Forward {
   }
 
   async newForwardIn({
-    id,
-    host,
-    username,
-    password = '',
-    privateKey = '',
-    port = 22,
-    remotePort,
-    localAddr,
-    localPort,
-  }) {
+                       id,
+                       host,
+                       username,
+                       password = '',
+                       privateKey = '',
+                       port = 22,
+                       remotePort,
+                       localAddr,
+                       localPort,
+                     }) {
     // 已经处理过，不再处理
     if (this.forwardConnectionMap.get(id)) {
       return { success: true, errorMessage: '' };
@@ -1581,7 +1579,7 @@ export class Forward {
 
         connection.connection.on('tcp connection', (info, accept) => {
           const stream = accept().pause();
-          const socket = net.connect(localPort, localAddr, function () {
+          const socket = net.connect(localPort, localAddr, function() {
             socket.on('error', (error) => {
               console.log('forward tcp error', error);
             });
