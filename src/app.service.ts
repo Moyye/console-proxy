@@ -167,7 +167,7 @@ export class Provider
     return socket.sftpService.getFiles(messageBody);
   }
 
-  @SubscribeMessage('file:getFiles')
+  @SubscribeMessage('file:getFileByPath')
   async getFileByPath(socket: ConsoleSocket, messageBody) {
     return socket.sftpService.getFileByPath(messageBody);
   }
