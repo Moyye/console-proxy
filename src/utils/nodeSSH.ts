@@ -17,11 +17,13 @@ import {
 } from 'ssh2';
 
 import { Prompt, Stats, TransferOptions } from 'ssh2-streams';
+import { createAgentSockets } from './agent';
 
 export type Config = ConnectConfig & {
   password?: string;
   privateKey?: string;
   tryKeyboard?: boolean;
+  disableAgent?: boolean;
   onKeyboardInteractive?: (
     name: string,
     instructions: string,
@@ -251,7 +253,7 @@ export class NodeSSH {
     const connection = new SSH2.Client();
     this.connection = connection;
 
-    await new Promise<void>((resolve, reject) => {
+    await new Promise<void>(async (resolve, reject) => {
       connection.on('error', reject);
       if (config.onKeyboardInteractive) {
         connection.on('keyboard-interactive', config.onKeyboardInteractive);
@@ -271,7 +273,28 @@ export class NodeSSH {
         }
         reject(new SSHError('No response from server', 'ETIMEDOUT'));
       });
-      connection.connect(config);
+
+      try {
+        if (config.disableAgent) {
+          delete config.agent;
+        }
+        const proxyAgent = config.agent;
+        const sock = proxyAgent
+          ? await createAgentSockets(proxyAgent, {
+              targetHost: config.host,
+              targetPort: config.port,
+              readyTimeout: 3000,
+            })
+          : undefined;
+        delete config.agent;
+        connection.connect({
+          ...config,
+          // @ts-ignore
+          sock,
+        });
+      } catch (e) {
+        reject(e);
+      }
     });
 
     return this;
@@ -476,7 +499,7 @@ export class NodeSSH {
     );
     invariant(
       options.stream == null ||
-      ['both', 'stdout', 'stderr'].includes(options.stream),
+        ['both', 'stdout', 'stderr'].includes(options.stream),
       'options.stream must be one of both, stdout, stderr',
     );
     for (let i = 0, { length } = parameters; i < length; i += 1) {
