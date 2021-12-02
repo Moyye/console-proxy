@@ -25,6 +25,7 @@ import * as fs from 'fs';
 import IORedis from 'ioredis';
 import { parse as redisInfoParser } from 'redis-info';
 import * as shellEscape from 'shell-escape';
+import ProxyAgent from 'proxy-agent';
 
 const lookup = promisify(dns.lookup);
 const readFile = promisify(fs.readFile);
@@ -343,6 +344,9 @@ class Base {
         host:
           config.host === 'linuxServer' ? process.env.TMP_SERVER : config.host,
         privateKey: config.privateKey || undefined,
+        // @ts-ignore
+        sock: new ProxyAgent('http://127.0.0.1:1087'),
+        // ...(config.agent && { sock: new ProxyAgent(config.agent) }),
       });
 
       // 方便读取 id, 避免重新计算
