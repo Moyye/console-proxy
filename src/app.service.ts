@@ -34,6 +34,7 @@ enum KEYS {
   connectionSubMap = 'connectionSubMap',
   connectionId = 'connectionId',
   serverStatusLock = 'serverStatusLock',
+  forwardCloseCallback = 'forwardCloseCallback',
 }
 
 @Injectable()
@@ -292,7 +293,7 @@ class Base {
   }
 
   async getConnection(
-    configOrId?: ConnectionConfig | string,
+    configOrId: ConnectionConfig | string,
     retryDelay?: number,
     debugfrom?: string,
   ): Promise<Undefinable<NodeSSH>> {
@@ -314,7 +315,9 @@ class Base {
     }
 
     const connectionId = md5(
-      `${config.host}${config.username}${config.port}${config.password}${config.privateKey}`,
+      `${config.host}${config.username}${config.port}${config.password}${
+        config.privateKey
+      }${config.randomId ? configOrId : ''}`,
     ).toString();
 
     const connectExist = this.connectionMap.get(connectionId);
@@ -1466,6 +1469,102 @@ export class ServerStatus extends Base {
     );
 
     return { data: JSON.parse(stdout || '{}') };
+  }
+}
+
+@Injectable()
+export class InnerForward extends Base {
+  private logger: Logger = new Logger('InnerForward');
+  private forwardConnectionMap: Map<string, NodeSSH> = new Map();
+
+  async handleConnectionClose(connection: NodeSSH) {
+    const connectionId = _.get(connection, KEYS.connectionId);
+    this.connectionMap.delete(connectionId);
+
+    const forwardCloseCallback = _.get(connection, KEYS.forwardCloseCallback);
+    if (forwardCloseCallback) {
+      forwardCloseCallback();
+    }
+  }
+
+  forwardStatus() {
+    const status: Record<string, boolean> = {};
+
+    this.forwardConnectionMap.forEach((connection, id) => {
+      status[id] = connection.isConnected();
+    });
+
+    return status;
+  }
+
+  async startForwardIn(config: ConnectionConfig, params: ForwardInParams) {
+    // 已经处理过，不再处理
+    if (this.forwardConnectionMap.get(params.id)) {
+      return { success: true, errorMessage: '' };
+    }
+
+    // 添加连接 id，不复用连接
+    config = { ...config, randomId: params.id };
+
+    const connection = await this.forwardIn(config, params);
+    // 重新连接
+    _.set(connection, KEYS.forwardCloseCallback, () => {
+      this.forwardConnectionMap.delete(params.id);
+      this.startForwardIn(config, params);
+    });
+
+    this.forwardConnectionMap.set(params.id, connection);
+
+    this.logger.log(
+      `[newForwardOut] connected, server: ${config.username}@${config.host}`,
+    );
+  }
+
+  async unForwardIn(id: string) {
+    const connection = this.forwardConnectionMap.get(id);
+    if (connection) {
+      _.set(connection, KEYS.forwardCloseCallback, undefined);
+      connection.dispose();
+      this.forwardConnectionMap.delete(id);
+      this.logger.log('unForward success');
+    }
+  }
+
+  async forwardIn(config: ConnectionConfig | string, params: ForwardInParams) {
+    return new Promise<NodeSSH>(async (resolve, reject) => {
+      try {
+        const { remoteAddr, remotePort, localAddr, localPort } = params;
+
+        const connection = await this.getConnection(config);
+
+        connection.connection.forwardIn(remoteAddr, remotePort, (err) => {
+          if (err) {
+            connection.dispose();
+            this.logger.error(err);
+            reject(err);
+            return;
+          }
+          this.logger.log(
+            `forwardIn success, server: ${remoteAddr}:${remotePort} => ${localAddr}:${localPort}`,
+          );
+          resolve(connection);
+        });
+
+        connection.connection.on('tcp connection', (info, accept) => {
+          const stream = accept().pause();
+          const socket = net.connect(localPort, localAddr, function () {
+            socket.on('error', (error) => {
+              console.log('forward tcp error', error);
+            });
+            stream.pipe(socket);
+            socket.pipe(stream);
+            stream.resume();
+          });
+        });
+      } catch (error) {
+        reject(error);
+      }
+    });
   }
 }
 

@@ -31,6 +31,7 @@ export type Config = ConnectConfig & {
     prompts: Prompt[],
     finish: (responses: string[]) => void,
   ) => void;
+  randomId?: string;
 };
 
 export interface SSHExecCommandOptions {
