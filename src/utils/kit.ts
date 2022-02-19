@@ -25,14 +25,14 @@ export function sleep(ms: number): Promise<void> {
   });
 }
 
-export function WsErrorCatch(originError = false): MethodDecorator {
+export function ErrorCatch(originError = false): MethodDecorator {
   return (_, __, descriptor: TypedPropertyDescriptor<any>): void => {
     const originalMethod = descriptor.value;
     descriptor.value = async function fn(...args) {
       try {
         return await originalMethod.apply(this, [...args]);
       } catch (e) {
-        logger.error('[WsErrorCatch] error', e.stack || e.message);
+        logger.error('[ErrorCatch] error', e.stack || e.message);
         if (originError) {
           return e;
         }

@@ -1,7 +1,7 @@
 import { Config as ConnectionConfig } from './utils/nodeSSH';
 
-export interface ForwardInParams {
-  id: string;
+export interface ForwardParams {
+  connectionId: string;
   config: ConnectionConfig;
   remoteAddr: string;
   remotePort: number;
@@ -10,12 +10,10 @@ export interface ForwardInParams {
 }
 
 export class ForwardInRequestDto {
-  id: string;
-  host: string;
-  port: number;
-  username: string;
-  password: string;
-  privateKey: string;
+  type: string;
+  connectionId: string;
+  config: ConnectionConfig;
+  remoteAddr: string;
   remotePort: number;
   localAddr: string;
   localPort: number;

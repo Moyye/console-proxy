@@ -19,8 +19,8 @@ import * as isValidDomain from 'is-valid-domain';
 import * as dns from 'dns';
 import * as net from 'net';
 import { ConsoleSocket, SFTP } from './interface';
-import { decrypt, md5, sleep, WsErrorCatch } from './utils/kit';
-import { ForwardInParams } from './dto';
+import { decrypt, md5, sleep, ErrorCatch } from './utils/kit';
+import { ForwardParams } from './dto';
 import * as fs from 'fs';
 import IORedis from 'ioredis';
 import { parse as redisInfoParser } from 'redis-info';
@@ -35,6 +35,7 @@ enum KEYS {
   connectionId = 'connectionId',
   serverStatusLock = 'serverStatusLock',
   forwardCloseCallback = 'forwardCloseCallback',
+  forwardOUtServer = 'forwardOUtServer',
 }
 
 @Injectable()
@@ -270,7 +271,7 @@ class Base {
     Base.logger.log('handleConnectionClose');
   }
 
-  @WsErrorCatch()
+  @ErrorCatch()
   async preConnect({ ...config }) {
     try {
       await this.getConnection(config, undefined, 'preConnect');
@@ -301,7 +302,7 @@ class Base {
       return this.connectionMap.get(configOrId);
     }
 
-    const config = configOrId;
+    const config = _.cloneDeep(configOrId);
 
     const secretKey = md5(
       `${config.host}${config.username}${config.port}`,
@@ -317,7 +318,7 @@ class Base {
     const connectionId = md5(
       `${config.host}${config.username}${config.port}${config.password}${
         config.privateKey
-      }${config.randomId ? configOrId : ''}`,
+      }${config.connectionId ? configOrId : ''}`,
     ).toString();
 
     const connectExist = this.connectionMap.get(connectionId);
@@ -340,7 +341,8 @@ class Base {
 
       const connection = await new NodeSSH().connect({
         tryKeyboard: true,
-        keepaliveInterval: 10000,
+        keepaliveInterval: 2000,
+        keepaliveCountMax: Number.MAX_SAFE_INTEGER,
         readyTimeout: 100000,
         ...config,
         host:
@@ -356,7 +358,6 @@ class Base {
 
       connection.connection?.on('error', (error) => {
         Base.logger.error('connection server error', error.stack);
-        this.handleConnectionClose(connection);
       });
       connection.connection?.on('close', () => {
         Base.logger.warn('connection server close');
@@ -378,7 +379,7 @@ export class Shell extends Base {
     super();
   }
 
-  @WsErrorCatch()
+  @ErrorCatch()
   async getShell(id: string, connection?: NodeSSH) {
     const sshExist = this.shellMap.get(id);
     if (sshExist) return sshExist;
@@ -400,7 +401,7 @@ export class Shell extends Base {
     return undefined;
   }
 
-  @WsErrorCatch()
+  @ErrorCatch()
   async closeShell({ id }) {
     // i love you baby
     const shell = await this.getShell(id);
@@ -435,7 +436,7 @@ export class Shell extends Base {
     }
   }
 
-  @WsErrorCatch()
+  @ErrorCatch()
   async newShell({ id, ...config }) {
     try {
       const connection = (await this.getConnection(
@@ -498,12 +499,12 @@ export class Shell extends Base {
     };
   }
 
-  @WsErrorCatch()
+  @ErrorCatch()
   async input({ id, data }) {
     (await this.getShell(id))?.write(data);
   }
 
-  @WsErrorCatch()
+  @ErrorCatch()
   async resize({ id, data: { cols, rows, height = 480, width = 640 } }) {
     (await this.getShell(id))?.setWindow(rows, cols, height, width);
   }
@@ -567,7 +568,7 @@ export class Sftp extends Base {
     return sftpClient;
   }
 
-  @WsErrorCatch()
+  @ErrorCatch()
   async closeSftp({ id }) {
     const sftp = await this.sftpMap.get(id);
     if (sftp) {
@@ -577,7 +578,7 @@ export class Sftp extends Base {
     }
   }
 
-  @WsErrorCatch()
+  @ErrorCatch()
   async newSftp({ id, ...config }) {
     try {
       const connection = (await this.getConnection(config, undefined, 'sftp'))!;
@@ -598,7 +599,7 @@ export class Sftp extends Base {
     };
   }
 
-  @WsErrorCatch()
+  @ErrorCatch()
   async sftpReaddir({ id, data }) {
     let targetPath = data?.path;
     if (!targetPath || targetPath === '~') {
@@ -638,7 +639,7 @@ export class Sftp extends Base {
     };
   }
 
-  @WsErrorCatch()
+  @ErrorCatch()
   async touch({ id, data: { remotePath } }) {
     const sftp = await this.sftpMap.get(id);
     if (!sftp) return { errorMessage: '无法连接' };
@@ -650,7 +651,7 @@ export class Sftp extends Base {
     };
   }
 
-  @WsErrorCatch()
+  @ErrorCatch()
   async writeFile({ id, data: { remotePath, buffer } }) {
     const sftp = await this.sftpMap.get(id);
     if (!sftp) return { errorMessage: '无法连接' };
@@ -672,7 +673,7 @@ export class Sftp extends Base {
     };
   }
 
-  @WsErrorCatch()
+  @ErrorCatch()
   async writeFileByPath({ id, data: { localDirectory, remoteDirectory } }) {
     const connection = await this.getConnection(id);
     if (!connection) return { errorMessage: '无法连接' };
@@ -700,7 +701,7 @@ export class Sftp extends Base {
     };
   }
 
-  @WsErrorCatch()
+  @ErrorCatch()
   async writeFiles({ id, data: { files } }) {
     const connection = await this.getConnection(id);
     if (!connection) return { errorMessage: '无法连接' };
@@ -728,7 +729,7 @@ export class Sftp extends Base {
     };
   }
 
-  @WsErrorCatch()
+  @ErrorCatch()
   async getFile({ id, data: { remotePath } }) {
     const sftp = await this.sftpMap.get(id);
     if (!sftp) return { errorMessage: '无法连接' };
@@ -740,7 +741,7 @@ export class Sftp extends Base {
     };
   }
 
-  @WsErrorCatch()
+  @ErrorCatch()
   async getFiles(@MessageBody() { id, data: { remotePaths } }) {
     const connection = await this.getConnection(id);
     const sftp = await this.sftpMap.get(id);
@@ -765,7 +766,7 @@ export class Sftp extends Base {
     };
   }
 
-  @WsErrorCatch()
+  @ErrorCatch()
   async getFileByPath({ id, data: { localDirectory, remoteDirectory } }) {
     const connection = await this.getConnection(id);
     if (!connection) return { errorMessage: '无法连接' };
@@ -793,7 +794,7 @@ export class Sftp extends Base {
     };
   }
 
-  @WsErrorCatch()
+  @ErrorCatch()
   async getFilesByPath({ id, data: { files } }) {
     const connection = await this.getConnection(id);
     if (!connection) return { errorMessage: '无法连接' };
@@ -821,7 +822,7 @@ export class Sftp extends Base {
     };
   }
 
-  @WsErrorCatch()
+  @ErrorCatch()
   async rename({ id, data: { srcPath, destPath } }) {
     const sftp = await this.sftpMap.get(id);
     if (!sftp) return { errorMessage: '无法连接' };
@@ -833,7 +834,7 @@ export class Sftp extends Base {
     };
   }
 
-  @WsErrorCatch()
+  @ErrorCatch()
   async unlink(@MessageBody() { id, data: { remotePath } }) {
     const sftp = await this.sftpMap.get(id);
     if (!sftp) return { errorMessage: '无法连接' };
@@ -845,7 +846,7 @@ export class Sftp extends Base {
     };
   }
 
-  @WsErrorCatch()
+  @ErrorCatch()
   async rmdir(@MessageBody() { id, data: { remotePath } }) {
     const sftp = await this.sftpMap.get(id);
     if (!sftp) return { errorMessage: '无法连接' };
@@ -857,7 +858,7 @@ export class Sftp extends Base {
     };
   }
 
-  @WsErrorCatch()
+  @ErrorCatch()
   async rmrf(@MessageBody() { id, data: { remotePath } }) {
     const connection = await this.getConnection(id);
     if (!connection) {
@@ -877,7 +878,7 @@ export class Sftp extends Base {
     };
   }
 
-  @WsErrorCatch()
+  @ErrorCatch()
   async mkdir(@MessageBody() { id, data: { remotePath } }) {
     const sftp = await this.sftpMap.get(id);
     if (!sftp) return { errorMessage: '无法连接' };
@@ -889,7 +890,7 @@ export class Sftp extends Base {
     };
   }
 
-  @WsErrorCatch()
+  @ErrorCatch()
   async serverStatus({ id }) {
     try {
       const sftp = await this.sftpMap.get(id);
@@ -937,7 +938,7 @@ export class Redis extends Base {
     super();
   }
 
-  @WsErrorCatch()
+  @ErrorCatch()
   async redisConnect({
     id,
     host,
@@ -1001,7 +1002,7 @@ export class Redis extends Base {
     };
   }
 
-  @WsErrorCatch()
+  @ErrorCatch()
   async deleteRedisKey(
     @MessageBody() { id, refreshKeys = true, keys, match, count, method },
   ) {
@@ -1054,7 +1055,7 @@ export class Redis extends Base {
     };
   }
 
-  @WsErrorCatch()
+  @ErrorCatch()
   async redisKeys({ id, match, needType = true, count = 500 }) {
     const redis = this.redisMap.get(id);
     if (!redis) return { errorMessage: 'redis 已断开连接', data: [] };
@@ -1094,7 +1095,7 @@ export class Redis extends Base {
     };
   }
 
-  @WsErrorCatch()
+  @ErrorCatch()
   async redisHScan(@MessageBody() { id, match, key, count = 500 }) {
     const redis = this.redisMap.get(id);
     if (!redis) return { errorMessage: 'redis 已断开连接' };
@@ -1121,7 +1122,7 @@ export class Redis extends Base {
     };
   }
 
-  @WsErrorCatch()
+  @ErrorCatch()
   async redisSScan(@MessageBody() { id, match, key, count = 500 }) {
     const redis = this.redisMap.get(id);
     if (!redis) return { errorMessage: 'redis 已断开连接' };
@@ -1148,7 +1149,7 @@ export class Redis extends Base {
     };
   }
 
-  @WsErrorCatch()
+  @ErrorCatch()
   async redisCommand(@MessageBody() { id, command, params }) {
     const redis = this.redisMap.get(id);
     if (!redis) return { errorMessage: 'redis disconnect' };
@@ -1162,7 +1163,7 @@ export class Redis extends Base {
     }
   }
 
-  @WsErrorCatch()
+  @ErrorCatch()
   async redisInfo(@MessageBody() { id }) {
     const redis = this.redisMap.get(id);
     if (!redis) {
@@ -1202,7 +1203,7 @@ export class Redis extends Base {
     }
   }
 
-  @WsErrorCatch()
+  @ErrorCatch()
   async handleDisconnect(connectionId?: string) {
     Redis.logger.log(
       `[handleDisconnect] connectionId: ${connectionId ? 'one' : 'all'}`,
@@ -1380,7 +1381,7 @@ export class ServerStatus extends Base {
     });
   }
 
-  @WsErrorCatch()
+  @ErrorCatch()
   async hasInit(config: ConnectionConfig) {
     const connection = await this.getConnection(config);
 
@@ -1389,7 +1390,7 @@ export class ServerStatus extends Base {
     };
   }
 
-  @WsErrorCatch()
+  @ErrorCatch()
   async startFresh(configOrConnection: ConnectionConfig | NodeSSH) {
     let connection: NodeSSH;
     if (configOrConnection instanceof NodeSSH) {
@@ -1450,7 +1451,7 @@ export class ServerStatus extends Base {
     }
   }
 
-  @WsErrorCatch()
+  @ErrorCatch()
   async ServerStatus(connectionId: string) {
     const connection = await this.getConnection(connectionId);
     if (!connection) {
@@ -1476,10 +1477,12 @@ export class ServerStatus extends Base {
 export class InnerForward extends Base {
   private logger: Logger = new Logger('InnerForward');
   private forwardConnectionMap: Map<string, NodeSSH> = new Map();
+  private serverMap: Map<number, net.Server> = new Map();
 
   async handleConnectionClose(connection: NodeSSH) {
     const connectionId = _.get(connection, KEYS.connectionId);
     this.connectionMap.delete(connectionId);
+    this.forwardConnectionMap.delete(connectionId);
 
     const forwardCloseCallback = _.get(connection, KEYS.forwardCloseCallback);
     if (forwardCloseCallback) {
@@ -1497,30 +1500,52 @@ export class InnerForward extends Base {
     return status;
   }
 
-  async startForwardIn(config: ConnectionConfig, params: ForwardInParams) {
+  async startForward(params: ForwardParams, type: string) {
+    const connectionId = params.connectionId;
     // 已经处理过，不再处理
-    if (this.forwardConnectionMap.get(params.id)) {
+    if (this.forwardConnectionMap.get(params.connectionId)) {
       return { success: true, errorMessage: '' };
     }
+    const config = params.config;
+    let connection: NodeSSH;
 
-    // 添加连接 id，不复用连接
-    config = { ...config, randomId: params.id };
+    if (type === 'forwardIn') {
+      connection = await this.forwardIn(
+        { ...params.config, connectionId },
+        params,
+      );
+      // 重新连接
+      _.set(connection, KEYS.forwardCloseCallback, () => {
+        this.forwardConnectionMap.delete(connectionId);
+        this.startForward(params, type);
+      });
+    } else if (type === 'forwardOut') {
+      connection = await this.forwardOut(
+        { ...params.config, connectionId },
+        params,
+      );
+      // 重新连接
+      _.set(connection, KEYS.forwardCloseCallback, () => {
+        this.forwardConnectionMap.delete(connectionId);
+        // 关闭转发的服务器
+        const server: net.Server = _.get(connection, KEYS.forwardOUtServer);
+        if (server) {
+          server.close((err) => {
+            this.logger.error(err);
+            this.forwardOut(config, params);
+          });
+        }
+      });
+    }
 
-    const connection = await this.forwardIn(config, params);
-    // 重新连接
-    _.set(connection, KEYS.forwardCloseCallback, () => {
-      this.forwardConnectionMap.delete(params.id);
-      this.startForwardIn(config, params);
-    });
-
-    this.forwardConnectionMap.set(params.id, connection);
+    this.forwardConnectionMap.set(connectionId, connection);
 
     this.logger.log(
-      `[newForwardOut] connected, server: ${config.username}@${config.host}`,
+      `[startForward] connected, server: ${config.username}@${config.host}`,
     );
   }
 
-  async unForwardIn(id: string) {
+  async unForward(id: string) {
     const connection = this.forwardConnectionMap.get(id);
     if (connection) {
       _.set(connection, KEYS.forwardCloseCallback, undefined);
@@ -1530,14 +1555,69 @@ export class InnerForward extends Base {
     }
   }
 
-  async forwardIn(config: ConnectionConfig | string, params: ForwardInParams) {
+  private async forwardOut(config: ConnectionConfig, params: ForwardParams) {
     return new Promise<NodeSSH>(async (resolve, reject) => {
       try {
-        const { remoteAddr, remotePort, localAddr, localPort } = params;
+        const { remotePort, localPort } = params;
+        const connection = await this.getConnection(config);
+
+        const server = net.createServer((socket) => {
+          connection.connection.forwardOut(
+            '0.0.0.0',
+            localPort,
+            config.host,
+            remotePort,
+            (err, stream) => {
+              if (err) {
+                socket.destroy();
+                this.logger.error(err);
+                return;
+              }
+              stream.on('close', () => {
+                socket.destroy();
+              });
+              socket.on('close', () => {
+                stream.close();
+              });
+              stream.pipe(socket);
+              socket.pipe(stream);
+            },
+          );
+        });
+
+        if (this.serverMap.get(localPort)) {
+          await new Promise((resolve) =>
+            this.serverMap.get(localPort).close(resolve),
+          );
+          this.serverMap.delete(localPort);
+        }
+
+        server.listen(localPort, () => {
+          const address = server.address();
+          if (typeof address !== 'string') {
+            this.logger.log(
+              `forwardOut success, server: ${config.host}:${remotePort} => ${address.address}:${address.port}`,
+            );
+          }
+          resolve(connection);
+        });
+
+        this.serverMap.set(localPort, server);
+        _.set(connection, KEYS.forwardOUtServer, server);
+      } catch (error) {
+        reject(error);
+      }
+    });
+  }
+
+  private async forwardIn(config: ConnectionConfig, params: ForwardParams) {
+    return new Promise<NodeSSH>(async (resolve, reject) => {
+      try {
+        const { remotePort, localAddr, localPort } = params;
 
         const connection = await this.getConnection(config);
 
-        connection.connection.forwardIn(remoteAddr, remotePort, (err) => {
+        connection.connection.forwardIn('0.0.0.0', remotePort, (err) => {
           if (err) {
             connection.dispose();
             this.logger.error(err);
@@ -1545,7 +1625,7 @@ export class InnerForward extends Base {
             return;
           }
           this.logger.log(
-            `forwardIn success, server: ${remoteAddr}:${remotePort} => ${localAddr}:${localPort}`,
+            `forwardIn success, server: ${config.host}:${remotePort} => ${localAddr}:${localPort}`,
           );
           resolve(connection);
         });
@@ -1565,158 +1645,5 @@ export class InnerForward extends Base {
         reject(error);
       }
     });
-  }
-}
-
-@Injectable()
-export class Forward {
-  private logger: Logger = new Logger('WebsocketGateway');
-
-  private forwardConnectionMap: Map<string, NodeSSH> = new Map();
-
-  ping(): string {
-    return 'pong';
-  }
-
-  async newForwardIn({
-    id,
-    host,
-    username,
-    password = '',
-    privateKey = '',
-    port = 22,
-    remotePort,
-    localAddr,
-    localPort,
-  }) {
-    // 已经处理过，不再处理
-    if (this.forwardConnectionMap.get(id)) {
-      return { success: true, errorMessage: '' };
-    }
-
-    try {
-      if (isValidDomain(host, { allowUnicode: true })) {
-        try {
-          const { address } = await lookup(host);
-          host = address;
-        } catch (e) {
-          // nothing
-        }
-      }
-
-      const connection = await this.forwardIn({
-        id,
-        config: {
-          host,
-          username,
-          port,
-          tryKeyboard: true,
-          ...(password && { password }),
-          ...(privateKey && { privateKey }),
-          keepaliveInterval: 10000,
-        },
-        remoteAddr: host,
-        remotePort,
-        localAddr,
-        localPort,
-      });
-
-      this.forwardConnectionMap.set(id, connection);
-
-      this.logger.log(`[newForwardOut] connected, server: ${username}@${host}`);
-    } catch (error) {
-      this.logger.error('[newForwardOut] error', error.stack);
-      return { success: false, errorMessage: error.message };
-    }
-
-    return { success: true, errorMessage: '' };
-  }
-
-  async forwardIn(params: ForwardInParams) {
-    return new Promise<NodeSSH>(async (resolve, reject) => {
-      try {
-        const {
-          id,
-          config,
-          remoteAddr,
-          remotePort,
-          localAddr,
-          localPort,
-        } = params;
-
-        const connection = await new NodeSSH().connect(config);
-
-        _.set(connection, '_config', params);
-
-        connection.connection?.on('error', (error) => {
-          this.logger.error('connection server error', error.stack);
-        });
-        connection.connection?.on('close', () => {
-          this.logger.warn('connection close, and retry forward');
-          setTimeout(async () => {
-            // 移除原来的
-            connection.dispose(true);
-            this.forwardConnectionMap.delete(id);
-
-            // 重新连接
-            this.forwardConnectionMap.set(id, await this.forwardIn(params));
-          }, 1000);
-        });
-
-        connection.connection.forwardIn(remoteAddr, remotePort, (err) => {
-          if (err) {
-            if (connection.connection) {
-              connection.connection.removeAllListeners('close');
-            }
-            connection.dispose(true);
-            this.logger.error(err);
-            this.forwardConnectionMap.delete(id);
-            reject(err);
-            return;
-          }
-          this.logger.log(
-            `forwardIn success, server: ${remoteAddr}:${remotePort} => ${localAddr}:${localPort}`,
-          );
-          resolve(connection);
-          this.forwardConnectionMap.set(id, connection);
-        });
-
-        connection.connection.on('tcp connection', (info, accept) => {
-          const stream = accept().pause();
-          const socket = net.connect(localPort, localAddr, function () {
-            socket.on('error', (error) => {
-              console.log('forward tcp error', error);
-            });
-            stream.pipe(socket);
-            socket.pipe(stream);
-            stream.resume();
-          });
-        });
-      } catch (error) {
-        reject(error);
-      }
-    });
-  }
-
-  unForward(id: string) {
-    const connection = this.forwardConnectionMap.get(id);
-    if (connection) {
-      const config: ForwardInParams = _.get(connection, '_config');
-      connection.connection.removeAllListeners('close');
-      connection.connection.unforwardIn(config.remoteAddr, config.remotePort);
-      connection.dispose(true);
-      this.forwardConnectionMap.delete(id);
-      this.logger.log('unForward success');
-    }
-  }
-
-  forwardStatus() {
-    const status: Record<string, boolean> = {};
-
-    this.forwardConnectionMap.forEach((connection, id) => {
-      status[id] = connection.isConnected();
-    });
-
-    return status;
   }
 }

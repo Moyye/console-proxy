@@ -1,17 +1,22 @@
 import { Body, Controller, Delete, Get, Param, Post } from '@nestjs/common';
 import fetch from 'node-fetch';
 import { ForwardInRequestDto, ForwardInResponseDto } from './dto';
-import { Forward } from './app.service';
+import { InnerForward } from './app.service';
+import { ErrorCatch } from './utils/kit';
 
 @Controller()
 export class AppController {
-  constructor(private readonly forwardService: Forward) {}
+  constructor(private readonly forwardService: InnerForward) {}
 
-  @Post('/forward-in')
+  @Post('/forward')
+  @ErrorCatch()
   async newForwardIn(
     @Body() body: ForwardInRequestDto,
   ): Promise<ForwardInResponseDto> {
-    return this.forwardService.newForwardIn(body);
+    return this.forwardService.startForward(
+      body,
+      body.type === 'IN' ? 'forwardIn' : 'forwardOut',
+    );
   }
 
   @Delete('/forward/:id')

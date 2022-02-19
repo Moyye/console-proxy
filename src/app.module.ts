@@ -1,5 +1,5 @@
 import { Module } from '@nestjs/common';
-import { Provider, Forward } from './app.service';
+import { Provider, InnerForward } from './app.service';
 import { ConfigModule } from '@nestjs/config';
 import { AppController } from './app.controller';
 
@@ -10,6 +10,6 @@ import { AppController } from './app.controller';
     }),
   ],
   controllers: [AppController],
-  providers: [Provider, Forward],
+  providers: [Provider, InnerForward],
 })
 export class AppModule {}
