@@ -318,7 +318,7 @@ class Base {
     const connectionId = md5(
       `${config.host}${config.username}${config.port}${config.password}${
         config.privateKey
-      }${config.connectionId ? configOrId : ''}`,
+      }${config.connectionId ? config.connectionId : ''}`,
     ).toString();
 
     const connectExist = this.connectionMap.get(connectionId);
@@ -329,45 +329,111 @@ class Base {
       return this.getConnection(config);
     }
 
-    if (config) {
-      if (isValidDomain(config.host, { allowUnicode: true })) {
-        try {
-          const { address } = await lookup(config.host);
-          config.host = address;
-        } catch (e) {
-          // nothing
-        }
+    if (isValidDomain(config.host, { allowUnicode: true })) {
+      try {
+        const { address } = await lookup(config.host);
+        config.host = address;
+        configOrId.host = address;
+      } catch (e) {
+        // nothing
       }
-
-      const connection = await new NodeSSH().connect({
-        tryKeyboard: true,
-        keepaliveInterval: 2000,
-        keepaliveCountMax: Number.MAX_SAFE_INTEGER,
-        readyTimeout: 100000,
-        ...config,
-        host:
-          config.host === 'linuxServer' ? process.env.TMP_SERVER : config.host,
-        privateKey: config.privateKey || undefined,
-      });
-
-      // 方便读取 id, 避免重新计算
-      _.set(connection, KEYS.connectionId, connectionId);
-      _.set(connection, 'debugfrom', debugfrom);
-
-      this.connectionMap.set(connectionId, connection);
-
-      connection.connection?.on('error', (error) => {
-        Base.logger.error('connection server error', error.stack);
-      });
-      connection.connection?.on('close', () => {
-        Base.logger.warn('connection server close');
-        this.handleConnectionClose(connection);
-      });
-
-      return connection;
     }
 
-    return undefined;
+    let server: net.Server;
+    let sshProxyConnection: NodeSSH;
+    if (config.sshProxy && process.env.RUNTIME_ENV !== 'OFFICE') {
+      sshProxyConnection = await this.getConnection({
+        ...config.sshProxy,
+        connectionId:
+          Math.random()
+            .toString(36)
+            .replace(/[^a-z]+/g, '')
+            .substr(0, 5) + connectionId,
+      });
+      Base.logger.log(`[proxyConnection] start`);
+      server = net.createServer((socket) => {
+        sshProxyConnection.connection.forwardOut(
+          socket.remoteAddress,
+          socket.remotePort,
+          config.host,
+          config.port,
+          (err, stream) => {
+            if (err) {
+              socket.destroy();
+              Base.logger.error(err);
+              return;
+            }
+            stream.on('close', () => {
+              socket.destroy();
+            });
+            socket.on('close', () => {
+              stream.close();
+            });
+            stream.pipe(socket);
+            socket.pipe(stream);
+          },
+        );
+      });
+
+      sshProxyConnection.connection.on('close', () => {
+        server.close();
+      });
+
+      server.on('close', () => {
+        Base.logger.log(`[proxyServer] stop`);
+      });
+
+      await new Promise((resolve) => {
+        server.listen(0, () => {
+          Base.logger.log(`[proxyServer] start`);
+          resolve(true);
+        });
+      });
+    }
+
+    const reWriteInfo: any = {};
+    if (server && server.address()) {
+      const address = server.address();
+      if (typeof address !== 'string') {
+        reWriteInfo.host = address.address;
+        reWriteInfo.port = address.port;
+      }
+    }
+
+    if (config.host === 'linuxServer') {
+      reWriteInfo.host = process.env.TMP_SERVER;
+    }
+
+    const connection = await new NodeSSH().connect({
+      tryKeyboard: true,
+      keepaliveInterval: 2000,
+      keepaliveCountMax: Number.MAX_SAFE_INTEGER,
+      readyTimeout: 100000,
+      ...config,
+      ...reWriteInfo,
+      privateKey: config.privateKey || undefined,
+    });
+
+    // 方便读取 id, 避免重新计算
+    _.set(connection, KEYS.connectionId, connectionId);
+    _.set(connection, 'debugfrom', debugfrom);
+
+    this.connectionMap.set(connectionId, connection);
+
+    connection.connection?.on('error', (error) => {
+      Base.logger.error('connection server error', error.stack);
+    });
+    connection.connection?.on('close', () => {
+      Base.logger.warn('connection server close');
+      this.handleConnectionClose(connection);
+    });
+    connection.connection.on('clear', () => {
+      if (sshProxyConnection) {
+        sshProxyConnection.dispose();
+      }
+    });
+
+    return connection;
   }
 }
 

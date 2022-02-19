@@ -32,6 +32,7 @@ export type Config = ConnectConfig & {
     finish: (responses: string[]) => void,
   ) => void;
   connectionId?: string;
+  sshProxy?: Config;
 };
 
 export interface SSHExecCommandOptions {
@@ -1175,6 +1176,7 @@ export class NodeSSH {
 
   dispose(removeListener = false) {
     if (this.connection) {
+      this.connection.emit('clear');
       if (removeListener) {
         this.connection.removeAllListeners();
       }
