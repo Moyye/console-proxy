@@ -280,7 +280,7 @@ export class NodeSSH {
         }
         const proxyAgent = config.agent;
         const sock = proxyAgent
-          ? await createAgentSockets(proxyAgent, {
+          ? await createAgentSockets(proxyAgent as string, {
               targetHost: config.host,
               targetPort: config.port,
               readyTimeout: 3000,

@@ -39,7 +39,8 @@ enum KEYS {
 @Injectable()
 @WebSocketGateway()
 export class Provider
-  implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect {
+  implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect
+{
   private logger: Logger = new Logger('Provider');
 
   afterInit(): void {
@@ -64,6 +65,30 @@ export class Provider
     socket.redisService.handleDisconnect();
     socket.serverStatusService.handleDisconnect();
     socket.removeAllListeners();
+  }
+
+  @SubscribeMessage('terminal:ping')
+  async ping(socket: ConsoleSocket, { host, port }) {
+    return { success: true, errorMessage: '' };
+  }
+
+  @SubscribeMessage('terminal:testConnect')
+  async testShellConnect(socket: ConsoleSocket, messageBody) {
+    try {
+      console.log('connection');
+      const connection = await socket.shellService.getConnection(messageBody);
+      console.log(connection);
+      socket.shellService.handleDisconnect(
+        _.get(connection, KEYS.connectionId),
+      );
+    } catch (e) {
+      return {
+        success: false,
+        errorMessage: e.message,
+      };
+    }
+
+    return { success: true, errorMessage: '' };
   }
 
   @SubscribeMessage('terminal:preConnect')
@@ -1166,11 +1191,7 @@ export class Redis extends Base {
       return { errorMessage: 'redis disconnect' };
     }
     try {
-      const [
-        [, keyspace],
-        [, info],
-        [, [, databases]],
-      ] = await redis
+      const [[, keyspace], [, info], [, [, databases]]] = await redis
         .pipeline()
         .info('keyspace')
         .info()
@@ -1536,14 +1557,8 @@ export class Forward {
   async forwardIn(params: ForwardInParams) {
     return new Promise<NodeSSH>(async (resolve, reject) => {
       try {
-        const {
-          id,
-          config,
-          remoteAddr,
-          remotePort,
-          localAddr,
-          localPort,
-        } = params;
+        const { id, config, remoteAddr, remotePort, localAddr, localPort } =
+          params;
 
         const connection = await new NodeSSH().connect(config);
 
