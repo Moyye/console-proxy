@@ -75,9 +75,7 @@ export class Provider
   @SubscribeMessage('terminal:testConnect')
   async testShellConnect(socket: ConsoleSocket, messageBody) {
     try {
-      console.log('connection');
       const connection = await socket.shellService.getConnection(messageBody);
-      console.log(connection);
       socket.shellService.handleDisconnect(
         _.get(connection, KEYS.connectionId),
       );
