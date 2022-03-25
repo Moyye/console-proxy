@@ -4,15 +4,25 @@
 - 格式为 http://IP:PORT
 - 例如部署在本地的就是 http://127.0.0.1:3000 （http协议，不是https协议哦）
 
-### 方法一：Docker 运行
+### 方法一(建议)：Docker 运行
 ```
-# 建议每次执行 docker pull 每次获取最新的镜像
+# 若未安装 docker，可以一键安装 docker 环境后执行上面的安装命令
+$ curl -fsSL https://get.docker.com | bash -s docker --mirror Aliyun
+
+# 已经安装了 docker 的服务器直接执行下面的安装命令
 $ docker pull selypan/console-proxy:latest
-$ docker run -d -p 3000:3000 selypan/console-proxy:latest
+$ docker run -d -p 3000:3000 --name console-proxy selypan/console-proxy:latest
+
+安装完成后，地址为服务器公网IP（局域网IP），端口为3000，例如 http://127.0.0.1:3000
+```
+
+一键安装，适合没有安装过 docker 的 linux 主机
+```shell
+curl -fsSL https://get.docker.com | bash -s docker --mirror Aliyun && docker pull selypan/console-proxy:latest && docker run -d -p 3000:3000 --name console-proxy selypan/console-proxy:latest
 ```
 
 
-### 方法二：需要预先安装 node14+ 环境
+### 方法二(需要一定Node.js基础)：需要预先安装 node14+ 环境
 #### windows 和 mac 推荐下载安装包直接安装 [中文官网地址](http://nodejs.cn/download/)
 
 #### mac 和 linux 推荐使用进行安装nvm进行安装 [github首页](https://github.com/nvm-sh/nvm)
